@@ -412,15 +412,8 @@ async def tool_pomodoro_start(context: dict, work_min: int = 25, break_min: int 
     set_pomodoro_session(user_id, channel_id, "work", end_time, work_min, break_min, 0, loops)
 
     if bot:
-        from cogs.pomodoro import start_pomodoro_task, build_pomodoro_embed, PomodoroControlView
+        from cogs.pomodoro import start_pomodoro_task
         start_pomodoro_task(bot, user_id)
-        session = get_pomodoro_session(user_id)
-        embed = build_pomodoro_embed(session)
-        if channel and hasattr(channel, "send"):
-            try:
-                await channel.send(embed=embed, view=PomodoroControlView())
-            except Exception:
-                pass
 
     return {
         "success": True,

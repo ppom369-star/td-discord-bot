@@ -39,17 +39,23 @@ async def update_origin_card(bot: commands.Bot, channel_id: int, embed: discord.
     except Exception:
         pass
 
-async def send_sandbox_notification(bot: commands.Bot, content: str, embed: discord.Embed = None):
-    channel = bot.get_channel(SANDBOX_CHANNEL_ID)
+async def send_sandbox_notification(bot: commands.Bot, content: str, embed: discord.Embed = None, channel_id: int = None, view: discord.ui.View = None):
+    target_id = channel_id or SANDBOX_CHANNEL_ID
+    channel = bot.get_channel(target_id)
     if not channel:
         try:
-            channel = await bot.fetch_channel(SANDBOX_CHANNEL_ID)
+            channel = await bot.fetch_channel(target_id)
         except Exception:
-            return
-    try:
-        await channel.send(content=content, embed=embed)
-    except Exception:
-        pass
+            channel = None
+
+    if not channel and target_id != SANDBOX_CHANNEL_ID:
+        channel = bot.get_channel(SANDBOX_CHANNEL_ID)
+
+    if channel:
+        try:
+            await channel.send(content=content, embed=embed, view=view)
+        except Exception:
+            pass
 
 def get_session_config(session: dict | None) -> tuple[int, int, int, int]:
     s = session or {}
@@ -275,7 +281,9 @@ async def run_pomodoro_lifecycle(bot: commands.Bot, user_id: int):
                     await send_sandbox_notification(
                         bot,
                         content=f"🎉 <@{user_id}> **ยินดีด้วย! คุณทำงานครบเป้าหมาย {target}/{target} รอบโฟกัสเรียบร้อยแล้ว! 🏆**",
-                        embed=embed
+                        embed=embed,
+                        channel_id=c_id,
+                        view=PomodoroFinishedView()
                     )
                     break
                 else:
@@ -289,27 +297,26 @@ async def run_pomodoro_lifecycle(bot: commands.Bot, user_id: int):
                     await send_sandbox_notification(
                         bot,
                         content=f"🔔 <@{user_id}> **ครบเวลาโฟกัสรอบที่ {new_cycles}/{target} แล้ว!** ได้เวลาพักสายตา {break_m} นาที ☕",
-                        embed=embed
+                        embed=embed,
+                        channel_id=c_id,
+                        view=view
                     )
             elif mode == "break":
-                delete_pomodoro_session(user_id)
-                embed = discord.Embed(
-                    title="⏰ หมดเวลาพักสายตาแล้ว!",
-                    description=(
-                        f"> 🧘 **รอบที่สำเร็จแล้ว:** `{cycles}/{target}` รอบ\n"
-                        f"> พร้อมลุยงานรอบที่ `{cycles + 1}/{target}` แล้วหรือยัง? กดปุ่มด้านล่างเพื่อเริ่มต่อหรือจบงาน"
-                    ),
-                    color=discord.Color.from_rgb(245, 158, 11),
-                    timestamp=datetime.now()
-                )
+                work_end = get_bangkok_now() + timedelta(minutes=work_m)
+                next_cycle = cycles + 1
+                set_pomodoro_session(user_id, c_id, "work", work_end, work_m, break_m, cycles, target)
+                updated_s = get_pomodoro_session(user_id)
+
+                embed = build_pomodoro_embed(updated_s)
                 view = PomodoroControlView()
                 await update_origin_card(bot, c_id, embed=embed, view=view)
                 await send_sandbox_notification(
                     bot,
-                    content=f"⚡ <@{user_id}> **หมดเวลาพักแล้ว!** สดชื่นแล้วเตรียมลุยรอบที่ {cycles + 1}/{target} กันเลย 💪",
-                    embed=embed
+                    content=f"⚡ <@{user_id}> **หมดเวลาพักแล้ว!** ระบบเริ่มนับเวลาโฟกัสรอบที่ `{next_cycle}/{target}` อัตโนมัติ ({work_m} นาที) ลุยต่อกันเลย! 💪",
+                    embed=embed,
+                    channel_id=c_id,
+                    view=view
                 )
-                break
     except asyncio.CancelledError:
         pass
     finally:
