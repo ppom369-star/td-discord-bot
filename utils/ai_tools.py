@@ -415,6 +415,33 @@ def format_feed_snippet(entry, source: str) -> str:
     return f"[{source}{time_info}] {title}: {desc}"
 
 async def tool_search_web(query: str, max_results: int = 5) -> dict:
+    tavily_key = os.getenv("TAVILY_API_KEY")
+    if tavily_key:
+        try:
+            payload = {
+                "api_key": tavily_key,
+                "query": query,
+                "search_depth": "basic",
+                "include_answer": True,
+                "max_results": max_results
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post("https://api.tavily.com/search", json=payload, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        snippets = []
+                        if data.get("answer"):
+                            snippets.append(f"[AI Summary]: {data['answer']}")
+                        for item in data.get("results", []):
+                            title = item.get("title", "")
+                            item_url = item.get("url", "")
+                            content = item.get("content", "")
+                            snippets.append(f"[{title}] ({item_url}): {content}")
+                        if snippets:
+                            return {"query": query, "results": snippets}
+        except Exception:
+            pass
+
     try:
         encoded_q = urllib.parse.quote(query)
         has_english = any(c.isascii() and c.isalpha() for c in query)
