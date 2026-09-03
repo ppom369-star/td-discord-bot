@@ -103,11 +103,11 @@ async def call_gemini_api(session: aiohttp.ClientSession, user_prompt: str, hist
     if not GEMINI_API_KEY:
         return {"error": "ไม่พบ GEMINI_API_KEY ในไฟล์ .env"}
 
-    contents = []
+    raw_contents = []
     if history:
         for msg in history:
             role = "user" if msg["role"] == "user" else "model"
-            contents.append({
+            raw_contents.append({
                 "role": role,
                 "parts": [{"text": msg["content"]}]
             })
@@ -116,10 +116,17 @@ async def call_gemini_api(session: aiohttp.ClientSession, user_prompt: str, hist
     if tool_context:
         current_text += f"\n\n[ผลลัพธ์จากเครื่องมือระบบ หรือ การค้นหาเว็บสดๆ]:\n{tool_context}\n\n(นำข้อมูลสดด้านบนมาตอบผู้ใช้เป็นภาษาไทยอย่างกระชับ สุภาพ ถูกต้อง ชัดเจน ห้ามใช้ข้อมูลเก่าจากความจำตนเองเด็ดขาด)"
 
-    contents.append({
+    raw_contents.append({
         "role": "user",
         "parts": [{"text": current_text}]
     })
+
+    contents = []
+    for msg in raw_contents:
+        if contents and contents[-1]["role"] == msg["role"]:
+            contents[-1]["parts"][0]["text"] += "\n" + msg["parts"][0]["text"]
+        else:
+            contents.append(msg)
 
     payload = {
         "system_instruction": {

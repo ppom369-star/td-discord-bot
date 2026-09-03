@@ -55,9 +55,25 @@ def get_session_config(session: dict | None) -> tuple[int, int, int, int]:
     s = session or {}
     return s.get("work_min", 25), s.get("break_min", 5), s.get("cycles_done", 0), s.get("target_cycles", 4)
 
+def parse_end_time(val) -> datetime:
+    now = get_bangkok_now()
+    if isinstance(val, datetime):
+        dt = val
+    elif isinstance(val, str):
+        try:
+            dt = datetime.fromisoformat(val)
+        except Exception:
+            return now
+    else:
+        return now
+
+    if dt.tzinfo is None and now.tzinfo is not None:
+        dt = dt.replace(tzinfo=now.tzinfo)
+    return dt
+
 def build_pomodoro_embed(session: dict) -> discord.Embed:
     mode = session.get("mode", "work")
-    end_dt = datetime.fromisoformat(session["end_time"])
+    end_dt = parse_end_time(session.get("end_time"))
     unix_ts = int(end_dt.timestamp())
     work_m, break_m, cycles, target = get_session_config(session)
 
@@ -229,16 +245,11 @@ async def run_pomodoro_lifecycle(bot: commands.Bot, user_id: int):
             c_id = session["channel_id"]
             mode = session.get("mode")
             work_m, break_m, cycles, target = get_session_config(session)
-            end_time_str = session.get("end_time")
+            end_val = session.get("end_time")
+            end_time = parse_end_time(end_val)
+            now = get_bangkok_now()
+            wait_sec = max((end_time - now).total_seconds(), 0.0)
 
-            try:
-                end_time = datetime.fromisoformat(end_time_str)
-                now = get_bangkok_now()
-                wait_sec = max((end_time - now).total_seconds(), 0.0)
-            except Exception:
-                wait_sec = 0.0
-
-            # หลับรอเวลาจริงเป๊ะๆ ไม่เปลือง CPU ไม่ query ระหว่างรอ
             if wait_sec > 0:
                 await asyncio.sleep(wait_sec)
 
