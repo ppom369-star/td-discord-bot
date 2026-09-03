@@ -12,7 +12,7 @@ from database.db_manager import (
     set_setting,
     get_bangkok_now
 )
-from utils.dashboard import deliver_channel_card
+from utils.dashboard import deliver_channel_card, DASHBOARD_CHANNELS
 
 SANDBOX_CHANNEL_ID = 1544548171584245860
 
@@ -33,13 +33,14 @@ async def update_origin_card(bot: commands.Bot, channel_id: int, embed: discord.
             return
         except Exception:
             pass
-    try:
-        new_msg = await channel.send(embed=embed, view=view)
-        set_setting(f"channel_card_{channel_id}", str(new_msg.id))
-    except Exception:
-        pass
+    if channel_id in DASHBOARD_CHANNELS:
+        try:
+            new_msg = await channel.send(embed=embed, view=view)
+            set_setting(f"channel_card_{channel_id}", str(new_msg.id))
+        except Exception:
+            pass
 
-async def send_sandbox_notification(bot: commands.Bot, content: str, embed: discord.Embed = None, channel_id: int = None, view: discord.ui.View = None):
+async def send_sandbox_notification(bot: commands.Bot, content: str, embed: discord.Embed = None, channel_id: int = None):
     target_id = channel_id or SANDBOX_CHANNEL_ID
     channel = bot.get_channel(target_id)
     if not channel:
@@ -53,7 +54,7 @@ async def send_sandbox_notification(bot: commands.Bot, content: str, embed: disc
 
     if channel:
         try:
-            await channel.send(content=content, embed=embed, view=view)
+            await channel.send(content=content, embed=embed)
         except Exception:
             pass
 
@@ -282,8 +283,7 @@ async def run_pomodoro_lifecycle(bot: commands.Bot, user_id: int):
                         bot,
                         content=f"🎉 <@{user_id}> **ยินดีด้วย! คุณทำงานครบเป้าหมาย {target}/{target} รอบโฟกัสเรียบร้อยแล้ว! 🏆**",
                         embed=embed,
-                        channel_id=c_id,
-                        view=PomodoroFinishedView()
+                        channel_id=c_id
                     )
                     break
                 else:
@@ -298,8 +298,7 @@ async def run_pomodoro_lifecycle(bot: commands.Bot, user_id: int):
                         bot,
                         content=f"🔔 <@{user_id}> **ครบเวลาโฟกัสรอบที่ {new_cycles}/{target} แล้ว!** ได้เวลาพักสายตา {break_m} นาที ☕",
                         embed=embed,
-                        channel_id=c_id,
-                        view=view
+                        channel_id=c_id
                     )
             elif mode == "break":
                 work_end = get_bangkok_now() + timedelta(minutes=work_m)
@@ -314,8 +313,7 @@ async def run_pomodoro_lifecycle(bot: commands.Bot, user_id: int):
                     bot,
                     content=f"⚡ <@{user_id}> **หมดเวลาพักแล้ว!** ระบบเริ่มนับเวลาโฟกัสรอบที่ `{next_cycle}/{target}` อัตโนมัติ ({work_m} นาที) ลุยต่อกันเลย! 💪",
                     embed=embed,
-                    channel_id=c_id,
-                    view=view
+                    channel_id=c_id
                 )
     except asyncio.CancelledError:
         pass
