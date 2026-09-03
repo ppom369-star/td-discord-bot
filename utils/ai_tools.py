@@ -414,7 +414,34 @@ def format_feed_snippet(entry, source: str) -> str:
     time_info = f" ({pub[:16]})" if pub else ""
     return f"[{source}{time_info}] {title}: {desc}"
 
-async def tool_search_web(query: str, max_results: int = 5) -> dict:
+SEARCH_CACHE = {}
+SEARCH_CACHE_TTL = 3600
+SEARCH_CACHE_MAX_ENTRIES = 100
+
+def get_cached_search(query: str) -> dict | None:
+    normalized = query.strip().lower()
+    if normalized in SEARCH_CACHE:
+        entry = SEARCH_CACHE[normalized]
+        if time.time() - entry["timestamp"] < SEARCH_CACHE_TTL:
+            return entry["data"]
+        del SEARCH_CACHE[normalized]
+    return None
+
+def set_cached_search(query: str, data: dict):
+    normalized = query.strip().lower()
+    if len(SEARCH_CACHE) >= SEARCH_CACHE_MAX_ENTRIES:
+        oldest_key = min(SEARCH_CACHE.keys(), key=lambda k: SEARCH_CACHE[k]["timestamp"])
+        del SEARCH_CACHE[oldest_key]
+    SEARCH_CACHE[normalized] = {
+        "timestamp": time.time(),
+        "data": data
+    }
+
+async def tool_search_web(query: str, max_results: int = 4) -> dict:
+    cached_result = get_cached_search(query)
+    if cached_result:
+        return cached_result
+
     tavily_key = os.getenv("TAVILY_API_KEY")
     if tavily_key:
         try:
@@ -438,7 +465,9 @@ async def tool_search_web(query: str, max_results: int = 5) -> dict:
                             content = item.get("content", "")
                             snippets.append(f"[{title}] ({item_url}): {content}")
                         if snippets:
-                            return {"query": query, "results": snippets}
+                            result = {"query": query, "results": snippets}
+                            set_cached_search(query, result)
+                            return result
         except Exception:
             pass
 
@@ -476,7 +505,9 @@ async def tool_search_web(query: str, max_results: int = 5) -> dict:
         if not snippets:
             return {"error": "ไม่สามารถค้นหาข้อมูลได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง"}
 
-        return {"query": query, "results": snippets}
+        result = {"query": query, "results": snippets}
+        set_cached_search(query, result)
+        return result
     except Exception:
         return {"error": "ไม่สามารถค้นหาข้อมูลได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง"}
 
