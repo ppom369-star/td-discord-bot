@@ -168,7 +168,19 @@ async def tool_get_air_quality(city: str = "Bangkok") -> dict:
     report = await fetch_air_quality_report(city)
     if not report:
         return {"error": f"ไม่พบข้อมูลคุณภาพอากาศสำหรับ '{city}'"}
-    return report
+    
+    clean_eval = dict(report.get("eval", {}))
+    if "color" in clean_eval:
+        clean_eval["color"] = str(clean_eval["color"])
+
+    return {
+        "location": report.get("location"),
+        "city_name": report.get("city_name"),
+        "pm25": report.get("pm25"),
+        "pm10": report.get("pm10"),
+        "aqi": report.get("aqi"),
+        "eval": clean_eval
+    }
 
 async def tool_get_daily_briefing(context: dict) -> dict:
     user_id = context.get("user_id")
@@ -197,31 +209,11 @@ async def tool_get_daily_briefing(context: dict) -> dict:
     }
 
 async def tool_get_crypto_price(coin: str) -> dict:
-    from cogs.finance import resolve_coin_id
-    coin_id = resolve_coin_id(coin)
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {
-        "ids": coin_id,
-        "vs_currencies": "usd,thb",
-        "include_24hr_change": "true"
-    }
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, params=params, timeout=10) as resp:
-                if resp.status != 200:
-                    return {"error": "ไม่สามารถเชื่อมต่อ CoinGecko API ได้ในขณะนี้"}
-                data = await resp.json()
-                coin_data = data.get(coin_id)
-                if not coin_data:
-                    return {"error": f"ไม่พบเหรียญ '{coin}' ในระบบ CoinGecko"}
-                return {
-                    "coin": coin.upper(),
-                    "usd": coin_data.get("usd", 0.0),
-                    "thb": coin_data.get("thb", 0.0),
-                    "change_24h_pct": coin_data.get("usd_24h_change", 0.0)
-                }
-        except Exception as e:
-            return {"error": str(e)}
+    from cogs.finance import fetch_crypto_price
+    result = await fetch_crypto_price(coin)
+    if not result:
+        return {"error": f"ไม่พบข้อมูลราคาสำหรับเหรียญ '{coin}' ในระบบ"}
+    return result
 
 async def tool_get_exchange_rate(from_curr: str, to_curr: str, amount: float = 1.0) -> dict:
     base = from_curr.strip().upper()
@@ -355,7 +347,7 @@ async def tool_get_memos(context: dict) -> dict:
     return {
         "total": len(memos),
         "memos": [
-            {"id": m["id"], "title": m["title"], "content": m["content"], "date": m.get("created_at", "")[:10]}
+            {"id": m["id"], "title": m["title"], "content": m["content"], "date": str(m.get("created_at", ""))[:10]}
             for m in memos
         ]
     }
