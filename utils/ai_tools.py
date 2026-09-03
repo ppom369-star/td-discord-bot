@@ -31,7 +31,10 @@ from database.db_manager import (
     delete_youtube_subscription,
     add_stream_tracker,
     get_stream_trackers,
-    delete_stream_tracker
+    delete_stream_tracker,
+    set_pomodoro_session,
+    get_pomodoro_session,
+    delete_pomodoro_session
 )
 
 async def tool_get_fuel_price() -> dict:
@@ -405,6 +408,62 @@ async def tool_stream_unfollow(channel_login: str) -> dict:
     deleted = delete_stream_tracker(channel_login, "twitch")
     return {"success": deleted, "login": channel_login}
 
+async def tool_pomodoro_start(context: dict, work_min: int = 25, break_min: int = 5, loops: int = 4) -> dict:
+    user_id = context.get("user_id")
+    bot = context.get("bot")
+    channel = context.get("channel")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+
+    channel_id = channel.id if channel and hasattr(channel, "id") else 1544548171584245860
+    end_time = get_bangkok_now() + timedelta(minutes=work_min)
+    set_pomodoro_session(user_id, channel_id, "work", end_time, work_min, break_min, 0, loops)
+
+    if bot:
+        from cogs.pomodoro import start_pomodoro_task, build_pomodoro_embed, PomodoroControlView
+        start_pomodoro_task(bot, user_id)
+        session = get_pomodoro_session(user_id)
+        embed = build_pomodoro_embed(session)
+        if channel and hasattr(channel, "send"):
+            try:
+                await channel.send(embed=embed, view=PomodoroControlView())
+            except Exception:
+                pass
+
+    return {
+        "success": True,
+        "work_min": work_min,
+        "break_min": break_min,
+        "loops": loops,
+        "end_time": end_time.strftime("%H:%M")
+    }
+
+async def tool_pomodoro_stop(context: dict) -> dict:
+    user_id = context.get("user_id")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+    from cogs.pomodoro import stop_pomodoro_task
+    stop_pomodoro_task(user_id)
+    delete_pomodoro_session(user_id)
+    return {"success": True, "message": "ยุติเซสชัน Pomodoro เรียบร้อยแล้ว"}
+
+async def tool_pomodoro_status(context: dict) -> dict:
+    user_id = context.get("user_id")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+    session = get_pomodoro_session(user_id)
+    if not session:
+        return {"active": False, "message": "ไม่มีเซสชัน Pomodoro ที่กำลังทำงาน"}
+    return {
+        "active": True,
+        "mode": session.get("mode"),
+        "work_min": session.get("work_min"),
+        "break_min": session.get("break_min"),
+        "cycles_done": session.get("cycles_done"),
+        "target_cycles": session.get("target_cycles"),
+        "end_time": str(session.get("end_time"))
+    }
+
 def format_feed_snippet(entry, source: str) -> str:
     title = getattr(entry, "title", "").strip()
     desc = re.sub(r"<[^>]+>", "", getattr(entry, "description", "")).strip()
@@ -534,6 +593,9 @@ TOOL_HANDLERS = {
     "stream_follow": lambda args, ctx: tool_stream_follow(ctx, args.get("channel_login", "")),
     "stream_list": lambda args, ctx: tool_stream_list(),
     "stream_unfollow": lambda args, ctx: tool_stream_unfollow(args.get("channel_login", "")),
+    "pomodoro_start": lambda args, ctx: tool_pomodoro_start(ctx, int(args.get("work_min", 25)), int(args.get("break_min", 5)), int(args.get("loops", 4))),
+    "pomodoro_stop": lambda args, ctx: tool_pomodoro_stop(ctx),
+    "pomodoro_status": lambda args, ctx: tool_pomodoro_status(ctx),
     "search_web": lambda args, ctx: tool_search_web(args.get("query", ""))
 }
 
