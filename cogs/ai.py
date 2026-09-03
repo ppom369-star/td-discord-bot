@@ -123,7 +123,7 @@ async def call_gemini_api(session: aiohttp.ClientSession, user_prompt: str, hist
         "contents": contents,
         "generationConfig": {
             "responseMimeType": "application/json",
-            "temperature": 0.2
+            "temperature": 0.1
         }
     }
 
