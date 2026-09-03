@@ -1,0 +1,489 @@
+import os
+import re
+import time
+import asyncio
+import urllib.parse
+from datetime import datetime, timedelta
+import aiohttp
+import feedparser
+import discord
+from discord.ext import commands
+
+from database.db_manager import (
+    get_connection,
+    get_setting,
+    set_setting,
+    get_todos,
+    add_todo,
+    mark_todo_done,
+    delete_todo,
+    add_transaction,
+    get_month_summary,
+    add_reminder,
+    add_memo,
+    get_memos,
+    delete_memo,
+    get_bangkok_now,
+    get_guild_settings,
+    set_guild_youtube_channel,
+    add_youtube_subscription,
+    get_guild_youtube_subscriptions,
+    delete_youtube_subscription,
+    add_stream_tracker,
+    get_stream_trackers,
+    delete_stream_tracker
+)
+
+async def tool_get_fuel_price() -> dict:
+    from cogs.fuel import fetch_fuel_prices
+    fuel_data = await fetch_fuel_prices()
+    if not fuel_data:
+        return {"error": "ไม่สามารถดึงข้อมูลราคาน้ำมันจาก Bangchak API ได้ในขณะนี้"}
+
+    fuels = fuel_data.get("fuels", {})
+    g95 = fuels.get("Gasohol 95 S EVO", {})
+    g91 = fuels.get("Gasohol 91 S EVO", {})
+    e20 = fuels.get("Gasohol E20 S EVO", {})
+    diesel = fuels.get("Hi Diesel S", {})
+    premium98 = fuels.get("Hi Premium 98 Plus", {})
+
+    diff = g95.get("diff", 0.0) or diesel.get("diff", 0.0)
+    if diff > 0:
+        recommendation = f"พรุ่งนี้ราคาน้ำมันปรับขึ้น +{diff:.2f} บาท/ลิตร แนะนำเติมก่อนเที่ยงคืน"
+    elif diff < 0:
+        recommendation = f"พรุ่งนี้ราคาน้ำมันปรับลดลง {diff:.2f} บาท/ลิตร แนะนำรอเติมพรุ่งนี้เช้า"
+    else:
+        recommendation = "พรุ่งนี้ราคาน้ำมันยังคงเดิม ไม่มีการเปลี่ยนแปลง"
+
+    return {
+        "status_alert": recommendation,
+        "effective_text": fuel_data.get("effective_text", ""),
+        "fuels": {
+            "Gasohol 95": {"today": g95.get("today", 0.0), "tomorrow": g95.get("tomorrow", 0.0), "diff": g95.get("diff", 0.0)},
+            "Gasohol 91": {"today": g91.get("today", 0.0), "tomorrow": g91.get("tomorrow", 0.0), "diff": g91.get("diff", 0.0)},
+            "Gasohol E20": {"today": e20.get("today", 0.0), "tomorrow": e20.get("tomorrow", 0.0), "diff": e20.get("diff", 0.0)},
+            "Hi Diesel": {"today": diesel.get("today", 0.0), "tomorrow": diesel.get("tomorrow", 0.0), "diff": diesel.get("diff", 0.0)},
+            "Premium 98": {"today": premium98.get("today", 0.0), "tomorrow": premium98.get("tomorrow", 0.0), "diff": premium98.get("diff", 0.0)}
+        }
+    }
+
+async def tool_youtube_add(context: dict, channel_url_or_id: str) -> dict:
+    guild = context.get("guild")
+    if not guild:
+        return {"error": "คำสั่งนี้สามารถใช้ได้เฉพาะภายในเซิร์ฟเวอร์ Discord เท่านั้น"}
+
+    is_admin = context.get("is_admin", False)
+    if not is_admin:
+        return {"error": "คุณไม่มีสิทธิ์จัดการช่อง YouTube ในเซิร์ฟเวอร์นี้ (ต้องมีสิทธิ์ Administrator หรือ Manage Channels)"}
+
+    from cogs.youtube import extract_channel_id, fetch_youtube_feed, fetch_channel_avatar
+    channel_id = await extract_channel_id(channel_url_or_id)
+    if not channel_id:
+        return {"error": "ไม่พบ ID ช่อง YouTube จากลิงก์หรือข้อความที่ระบุ กรุณาส่งลิงก์ เช่น https://www.youtube.com/@channel หรือ UC..."}
+
+    feed = await fetch_youtube_feed(channel_id)
+    if not feed or (not feed.entries and not feed.feed.get("title")):
+        return {"error": f"ไม่สามารถดึงข้อมูล Feed จากช่อง YouTube ID {channel_id} ได้"}
+
+    channel_title = feed.feed.get("title", channel_id)
+    latest_video_id = None
+    if feed.entries:
+        latest_video_id = getattr(feed.entries[0], "yt_videoid", None) or getattr(feed.entries[0], "id", None)
+
+    avatar_url = await fetch_channel_avatar(channel_id)
+
+    settings = get_guild_settings(guild.id)
+    alert_channel_id = settings.get("youtube_channel_id") if settings else None
+    if not alert_channel_id:
+        channel = context.get("channel")
+        if channel and hasattr(channel, "id"):
+            set_guild_youtube_channel(guild.id, channel.id)
+            alert_channel_id = channel.id
+        else:
+            return {"error": "เซิร์ฟเวอร์ยังไม่ได้ตั้งค่าห้องแจ้งเตือน YouTube กรุณาระบุห้องหรือใช้ /youtube setup ก่อน"}
+
+    add_youtube_subscription(
+        guild_id=guild.id,
+        youtube_channel_id=channel_id,
+        channel_title=channel_title,
+        last_video_id=latest_video_id,
+        avatar_url=avatar_url
+    )
+
+    return {
+        "success": True,
+        "channel_title": channel_title,
+        "channel_id": channel_id,
+        "alert_channel_id": alert_channel_id
+    }
+
+async def tool_youtube_list(context: dict) -> dict:
+    guild = context.get("guild")
+    if not guild:
+        return {"error": "คำสั่งนี้สามารถใช้ได้เฉพาะภายในเซิร์ฟเวอร์ Discord เท่านั้น"}
+
+    subs = get_guild_youtube_subscriptions(guild.id)
+    settings = get_guild_settings(guild.id)
+    alert_channel_id = settings.get("youtube_channel_id") if settings else None
+
+    return {
+        "alert_channel_id": alert_channel_id,
+        "total": len(subs),
+        "subscriptions": [
+            {
+                "title": item.get("channel_title"),
+                "channel_id": item.get("youtube_channel_id")
+            }
+            for item in subs
+        ]
+    }
+
+async def tool_youtube_remove(context: dict, channel_id_or_title: str) -> dict:
+    guild = context.get("guild")
+    if not guild:
+        return {"error": "คำสั่งนี้สามารถใช้ได้เฉพาะภายในเซิร์ฟเวอร์ Discord เท่านั้น"}
+
+    is_admin = context.get("is_admin", False)
+    if not is_admin:
+        return {"error": "คุณไม่มีสิทธิ์ลบช่อง YouTube ในเซิร์ฟเวอร์นี้ (ต้องมีสิทธิ์ Administrator หรือ Manage Channels)"}
+
+    deleted = delete_youtube_subscription(guild.id, channel_id_or_title)
+    if not deleted:
+        return {"error": f"ไม่พบช่อง '{channel_id_or_title}' ในรายการติดตามของเซิร์ฟเวอร์นี้"}
+
+    return {"success": True, "target": channel_id_or_title}
+
+async def tool_get_weather(city: str = "Bangkok") -> dict:
+    from cogs.weather import fetch_weather_report
+    report = await fetch_weather_report(city)
+    if not report:
+        return {"error": f"ไม่พบข้อมูลสภาพอากาศสำหรับ '{city}'"}
+    return report
+
+async def tool_get_air_quality(city: str = "Bangkok") -> dict:
+    from cogs.weather import fetch_air_quality_report
+    report = await fetch_air_quality_report(city)
+    if not report:
+        return {"error": f"ไม่พบข้อมูลคุณภาพอากาศสำหรับ '{city}'"}
+    return report
+
+async def tool_get_daily_briefing(context: dict) -> dict:
+    user_id = context.get("user_id")
+    home_city = get_setting("briefing_home_city", "Bang Na")
+    work_city = get_setting("briefing_work_city", "Lat Phrao")
+
+    from cogs.weather import fetch_weather_report
+    from cogs.fuel import fetch_fuel_prices
+
+    home_w, work_w, fuel_data = await asyncio.gather(
+        fetch_weather_report(home_city),
+        fetch_weather_report(work_city),
+        fetch_fuel_prices()
+    )
+
+    pending_todos = get_todos(user_id, status="pending") if user_id else []
+
+    return {
+        "home_city": home_city,
+        "home_weather": home_w,
+        "work_city": work_city,
+        "work_weather": work_w,
+        "fuel": fuel_data.get("fuels") if fuel_data else None,
+        "pending_todos_count": len(pending_todos),
+        "pending_todos": [t.get("task") for t in pending_todos[:5]]
+    }
+
+async def tool_get_crypto_price(coin: str) -> dict:
+    from cogs.finance import resolve_coin_id
+    coin_id = resolve_coin_id(coin)
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {
+        "ids": coin_id,
+        "vs_currencies": "usd,thb",
+        "include_24hr_change": "true"
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params, timeout=10) as resp:
+                if resp.status != 200:
+                    return {"error": "ไม่สามารถเชื่อมต่อ CoinGecko API ได้ในขณะนี้"}
+                data = await resp.json()
+                coin_data = data.get(coin_id)
+                if not coin_data:
+                    return {"error": f"ไม่พบเหรียญ '{coin}' ในระบบ CoinGecko"}
+                return {
+                    "coin": coin.upper(),
+                    "usd": coin_data.get("usd", 0.0),
+                    "thb": coin_data.get("thb", 0.0),
+                    "change_24h_pct": coin_data.get("usd_24h_change", 0.0)
+                }
+        except Exception as e:
+            return {"error": str(e)}
+
+async def tool_get_exchange_rate(from_curr: str, to_curr: str, amount: float = 1.0) -> dict:
+    base = from_curr.strip().upper()
+    target = to_curr.strip().upper()
+    url = f"https://open.er-api.com/v6/latest/{base}"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    return {"error": "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์อัตราแลกเปลี่ยนได้"}
+                data = await resp.json()
+                if data.get("result") != "success":
+                    return {"error": f"ไม่พบสกุลเงิน '{base}'"}
+                rates = data.get("rates", {})
+                rate = rates.get(target)
+                if not rate:
+                    return {"error": f"ไม่พบสกุลเงิน '{target}'"}
+                return {
+                    "from_currency": base,
+                    "to_currency": target,
+                    "amount": amount,
+                    "rate": rate,
+                    "converted": round(amount * rate, 4)
+                }
+        except Exception as e:
+            return {"error": str(e)}
+
+async def tool_record_expense(context: dict, trans_type: str, amount: float, category: str = "ทั่วไป", note: str = "") -> dict:
+    user_id = context.get("user_id")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+    trans_id = add_transaction(
+        user_id=user_id,
+        trans_type=trans_type,
+        amount=float(amount),
+        category=category,
+        note=note or "บันทึกผ่าน AI"
+    )
+    return {
+        "success": True,
+        "id": trans_id,
+        "type": trans_type,
+        "amount": amount,
+        "category": category,
+        "note": note
+    }
+
+async def tool_get_expense_summary(context: dict) -> dict:
+    user_id = context.get("user_id")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+    summary = get_month_summary(user_id)
+    return summary
+
+async def tool_add_todo(context: dict, task: str) -> dict:
+    user_id = context.get("user_id")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+    todo_id = add_todo(user_id=user_id, task=task)
+    return {"success": True, "id": todo_id, "task": task}
+
+async def tool_get_todo_list(context: dict, status: str = "pending") -> dict:
+    user_id = context.get("user_id")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+    query_status = status if status in ("pending", "done") else None
+    todos = get_todos(user_id=user_id, status=query_status)
+    return {
+        "total": len(todos),
+        "status_filter": status,
+        "todos": [
+            {"id": t["id"], "task": t["task"], "status": t["status"]}
+            for t in todos
+        ]
+    }
+
+async def tool_complete_todo(context: dict, todo_id: int) -> dict:
+    user_id = context.get("user_id")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+    success = mark_todo_done(todo_id=int(todo_id), user_id=user_id)
+    return {"success": success, "todo_id": todo_id}
+
+async def tool_delete_todo(context: dict, todo_id: int) -> dict:
+    user_id = context.get("user_id")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+    success = delete_todo(todo_id=int(todo_id), user_id=user_id)
+    return {"success": success, "todo_id": todo_id}
+
+async def tool_set_reminder(context: dict, time_str: str, message: str) -> dict:
+    user_id = context.get("user_id")
+    bot = context.get("bot")
+    channel = context.get("channel")
+    channel_id = channel.id if channel and hasattr(channel, "id") else 1544548171584245860
+
+    from cogs.todo import parse_duration_string, start_reminder_task
+    delta = parse_duration_string(time_str) or timedelta(minutes=10)
+    due_time = get_bangkok_now() + delta
+
+    r_id = add_reminder(user_id=user_id, channel_id=channel_id, message=message, remind_at=due_time)
+    if bot:
+        start_reminder_task(
+            bot=bot,
+            reminder_id=r_id,
+            user_id=user_id,
+            message=message,
+            delay_seconds=delta.total_seconds()
+        )
+
+    return {
+        "success": True,
+        "reminder_id": r_id,
+        "message": message,
+        "timestamp": int(due_time.timestamp()),
+        "time_str": time_str
+    }
+
+async def tool_add_memo(context: dict, title: str, content: str) -> dict:
+    user_id = context.get("user_id")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+    m_id = add_memo(user_id=user_id, title=title, content=content)
+    return {"success": True, "id": m_id, "title": title}
+
+async def tool_get_memos(context: dict) -> dict:
+    user_id = context.get("user_id")
+    if not user_id:
+        return {"error": "ไม่พบรหัสผู้ใช้งาน"}
+    memos = get_memos(user_id=user_id)
+    return {
+        "total": len(memos),
+        "memos": [
+            {"id": m["id"], "title": m["title"], "content": m["content"], "date": m.get("created_at", "")[:10]}
+            for m in memos
+        ]
+    }
+
+async def tool_get_system_status(context: dict) -> dict:
+    bot = context.get("bot")
+    from cogs.utility import format_uptime, get_current_ram_mb
+    uptime_str = "N/A"
+    if bot:
+        cog = bot.get_cog("UtilityCog")
+        if cog and hasattr(cog, "start_time"):
+            uptime_str = format_uptime(time.time() - cog.start_time)
+
+    ram_mb = get_current_ram_mb()
+    latency_ms = round(bot.latency * 1000, 2) if bot else 0.0
+
+    return {
+        "uptime": uptime_str,
+        "ram_mb": f"{ram_mb:.1f} MB",
+        "latency_ms": f"{latency_ms} ms"
+    }
+
+async def tool_stream_follow(context: dict, channel_login: str) -> dict:
+    channel = context.get("channel")
+    dest_channel_id = channel.id if channel and hasattr(channel, "id") else 1544548048837808278
+    from cogs.twitch import fetch_twitch_user
+    async with aiohttp.ClientSession() as session:
+        user_data = await fetch_twitch_user(session, channel_login)
+        if not user_data:
+            return {"error": f"ไม่พบสตรีมเมอร์ Twitch บัญชี '{channel_login}'"}
+        display_name = user_data.get("displayName") or channel_login
+        add_stream_tracker("twitch", channel_login, display_name, dest_channel_id)
+        return {"success": True, "display_name": display_name, "login": channel_login}
+
+async def tool_stream_list() -> dict:
+    trackers = get_stream_trackers("twitch")
+    return {
+        "total": len(trackers),
+        "streamers": [
+            {
+                "display_name": t["display_name"],
+                "login": t["channel_login"],
+                "is_live": bool(t.get("is_live", 0))
+            }
+            for t in trackers
+        ]
+    }
+
+async def tool_stream_unfollow(channel_login: str) -> dict:
+    deleted = delete_stream_tracker(channel_login, "twitch")
+    return {"success": deleted, "login": channel_login}
+
+def format_feed_snippet(entry, source: str) -> str:
+    title = getattr(entry, "title", "").strip()
+    desc = re.sub(r"<[^>]+>", "", getattr(entry, "description", "")).strip()
+    pub = getattr(entry, "published", "").strip()
+    if not title and not desc:
+        return ""
+    time_info = f" ({pub[:16]})" if pub else ""
+    return f"[{source}{time_info}] {title}: {desc}"
+
+async def tool_search_web(query: str, max_results: int = 5) -> dict:
+    try:
+        encoded_q = urllib.parse.quote(query)
+        has_english = any(c.isascii() and c.isalpha() for c in query)
+        bing_market = "&setmkt=en-US" if has_english else ""
+        bing_url = f"https://www.bing.com/search?q={encoded_q}&format=rss{bing_market}"
+        news_url = f"https://news.google.com/rss/search?q={encoded_q}&hl=th&gl=TH&ceid=TH:th"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+        snippets = []
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async def fetch_feed(url: str, source: str):
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                        if resp.status == 200:
+                            content = await resp.read()
+                            feed = feedparser.parse(content)
+                            return source, feed.entries
+                except Exception:
+                    pass
+                return source, []
+
+            res = await asyncio.gather(
+                fetch_feed(bing_url, "Bing"),
+                fetch_feed(news_url, "Google News")
+            )
+            for source, entries in res:
+                for entry in entries[:max_results]:
+                    snippet = format_feed_snippet(entry, source)
+                    if snippet:
+                        snippets.append(snippet)
+
+        if not snippets:
+            return {"error": "ไม่สามารถค้นหาข้อมูลได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง"}
+
+        return {"query": query, "results": snippets}
+    except Exception:
+        return {"error": "ไม่สามารถค้นหาข้อมูลได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง"}
+
+TOOL_HANDLERS = {
+    "get_fuel_price": lambda args, ctx: tool_get_fuel_price(),
+    "youtube_add": lambda args, ctx: tool_youtube_add(ctx, args.get("channel_url_or_id", "")),
+    "youtube_list": lambda args, ctx: tool_youtube_list(ctx),
+    "youtube_remove": lambda args, ctx: tool_youtube_remove(ctx, args.get("channel_id_or_title", "")),
+    "get_weather": lambda args, ctx: tool_get_weather(args.get("city", "Bangkok")),
+    "get_air_quality": lambda args, ctx: tool_get_air_quality(args.get("city", "Bangkok")),
+    "get_daily_briefing": lambda args, ctx: tool_get_daily_briefing(ctx),
+    "get_crypto_price": lambda args, ctx: tool_get_crypto_price(args.get("coin", "btc")),
+    "get_exchange_rate": lambda args, ctx: tool_get_exchange_rate(args.get("from_currency", "USD"), args.get("to_currency", "THB"), float(args.get("amount", 1.0))),
+    "record_expense": lambda args, ctx: tool_record_expense(ctx, args.get("type", "expense"), float(args.get("amount", 0)), args.get("category", "ทั่วไป"), args.get("note", "")),
+    "get_expense_summary": lambda args, ctx: tool_get_expense_summary(ctx),
+    "add_todo": lambda args, ctx: tool_add_todo(ctx, args.get("task", "")),
+    "get_todo_list": lambda args, ctx: tool_get_todo_list(ctx, args.get("status", "pending")),
+    "complete_todo": lambda args, ctx: tool_complete_todo(ctx, args.get("todo_id", 0)),
+    "delete_todo": lambda args, ctx: tool_delete_todo(ctx, args.get("todo_id", 0)),
+    "set_reminder": lambda args, ctx: tool_set_reminder(ctx, args.get("time_str", "10m"), args.get("message", "")),
+    "add_memo": lambda args, ctx: tool_add_memo(ctx, args.get("title", ""), args.get("content", "")),
+    "get_memos": lambda args, ctx: tool_get_memos(ctx),
+    "get_system_status": lambda args, ctx: tool_get_system_status(ctx),
+    "stream_follow": lambda args, ctx: tool_stream_follow(ctx, args.get("channel_login", "")),
+    "stream_list": lambda args, ctx: tool_stream_list(),
+    "stream_unfollow": lambda args, ctx: tool_stream_unfollow(args.get("channel_login", "")),
+    "search_web": lambda args, ctx: tool_search_web(args.get("query", ""))
+}
+
+async def execute_ai_tool(tool_name: str, args: dict, context: dict) -> dict:
+    handler = TOOL_HANDLERS.get(tool_name)
+    if not handler:
+        return {"error": f"ไม่พบเครื่องมือ '{tool_name}' ในระบบ"}
+    try:
+        return await handler(args, context)
+    except Exception as e:
+        return {"error": f"เกิดข้อผิดพลาดในการประมวลผล {tool_name}: {str(e)}"}

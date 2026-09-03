@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "discord-py": {
+      "source": "frizzle-chan/mudd",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/discord-py/SKILL.md",
+      "computedHash": "e8e203a948f1802c3dd4404b4d7f15ce6e87fee28e1da2facbd7779b9d9bc884"
+    },
+    "rss-automation": {
+      "source": "aaaaqwq/claude-code-skills",
+      "sourceType": "github",
+      "skillPath": "skills/rss-automation/SKILL.md",
+      "computedHash": "3f796e148a3fa02969e605905d684dc78b5f5ee8a79a21f0cddf70410b9411ce"
+    },
+    "sqlalchemy": {
+      "source": "bobmatnyc/claude-mpm-skills",
+      "sourceType": "github",
+      "skillPath": "toolchains/python/data/sqlalchemy/SKILL.md",
+      "computedHash": "00b7617dedaf2cac2e73c769e6acde5250fb226d35a1954d92cc584fb3b8b067"
+    },
+    "sqlalchemy-postgres": {
+      "source": "cfircoo/claude-code-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/sqlalchemy-postgres/SKILL.md",
+      "computedHash": "6917c10f1ad78f5f1d097eed214f824b458ee2ec917308e98b0d0bb4e4dff961"
+    }
+  }
+}

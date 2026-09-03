@@ -1,0 +1,16 @@
+venv/
+.venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
+Thumbs.db
+.agents/
+.gemini/
+*.zip
