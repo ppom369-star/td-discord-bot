@@ -92,6 +92,7 @@ def build_system_instruction() -> str:
    - ข่าวด่วน, ผลการแข่งขันล่าสุด, ผู้ดำรงตำแหน่งในปัจจุบัน (เช่น นายกฯ, ผู้ว่าฯ, CEO)
 4. เมื่อสร้าง query สำหรับ "search_web" ให้ใช้คีย์เวิร์ดสั้นกระชับ ตรงประเด็น (เช่น "ตั๋วเครื่องบิน ญี่ปุ่น สงกรานต์", "OpenAI CEO", "ผลบอลพรีเมียร์ลีกล่าสุด") ห้ามใส่คำฟุ่มเฟือย
 5. หากมี [ผลลัพธ์จากเครื่องมือระบบ หรือ การค้นหาเว็บสดๆ] ส่งมาให้ ให้นำข้อมูลนั้นมาเป็นข้อเท็จจริงสูงสุด (Ground Truth) ในการตอบคำถาม ห้ามตอบขัดแย้งกับผลลัพธ์สดที่ได้เด็ดขาด และห้ามใช้ข้อมูลเก่าจากความจำของตนเองหากผลการค้นหาให้ข้อมูลที่เป็นปัจจุบันกว่า หากผลการค้นหาแจ้งว่า error หรือหาไม่พบ ให้ตอบว่าไม่สามารถค้นหาข้อมูลได้ในขณะนี้และแนะนำให้ลองใหม่อีกครั้ง ห้ามเดาหรือแต่งข้อมูลขึ้นเองเด็ดขาด
+6. เมื่อมีการเรียกใช้เครื่องมือ (tool_calls ไม่ว่างเปล่า) ให้ส่ง "reply": "" (เป็นสตริงว่าง) เสมอ ห้ามพิมพ์ข้อความทำนองว่า 'กำลังตรวจสอบ...' หรือ 'รอสักครู่...' เด็ดขาด เพราะระบบจะนำผลลัพธ์มาให้คุณตอบในรอบถัดไป
 """
 
 async def call_gemini_api(session: aiohttp.ClientSession, user_prompt: str, history: list[dict] = None, tool_context: str = "") -> dict | None:
@@ -131,7 +132,7 @@ async def call_gemini_api(session: aiohttp.ClientSession, user_prompt: str, hist
     for model_name in FALLBACK_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
         try:
-            async with session.post(url, json=payload, timeout=15) as resp:
+            async with session.post(url, json=payload, timeout=25) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     candidates = data.get("candidates", [])
@@ -230,7 +231,10 @@ async def process_ai_interaction(
 
         tool_json = json.dumps(tool_results, ensure_ascii=False)
         second_ai_data = await call_gemini_api(session, prompt, history, tool_context=tool_json)
-        reply_text = (second_ai_data or {}).get("reply") or ai_data.get("reply") or "ดำเนินการตามคำสั่งของระบบเรียบร้อยแล้วครับ"
+        if not second_ai_data or "error" in second_ai_data:
+            reply_text = "ขออภัยครับ ไม่สามารถประมวลผลข้อมูลได้ในขณะนี้ กรุณาลองใหม่อีกครั้งครับ"
+        else:
+            reply_text = second_ai_data.get("reply") or "ดำเนินการตามคำสั่งของระบบเรียบร้อยแล้วครับ"
 
     add_ai_chat_message(user_id=user.id, role="user", content=prompt)
     add_ai_chat_message(user_id=user.id, role="model", content=reply_text)

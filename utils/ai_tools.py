@@ -462,7 +462,7 @@ async def tool_search_web(query: str, max_results: int = 4) -> dict:
                         for item in data.get("results", []):
                             title = item.get("title", "")
                             item_url = item.get("url", "")
-                            content = item.get("content", "")
+                            content = (item.get("content", "") or "")[:700]
                             snippets.append(f"[{title}] ({item_url}): {content}")
                         if snippets:
                             result = {"query": query, "results": snippets}
