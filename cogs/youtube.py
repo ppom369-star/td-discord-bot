@@ -115,12 +115,12 @@ async def scrape_youtube_fallback(session: aiohttp.ClientSession, channel_id: st
         pass
     return YouTubeFeedResult([])
 
-async def fetch_youtube_feed(channel_id: str):
+async def fetch_youtube_feed(channel_id: str, session: aiohttp.ClientSession = None):
     feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(feed_url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+        if session:
+            async with session.get(feed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                 if resp.status == 200:
                     content = await resp.read()
                     loop = asyncio.get_running_loop()
@@ -128,6 +128,16 @@ async def fetch_youtube_feed(channel_id: str):
                     if parsed and parsed.entries:
                         return parsed
             return await scrape_youtube_fallback(session, channel_id)
+        else:
+            async with aiohttp.ClientSession(headers=headers) as local_session:
+                async with local_session.get(feed_url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+                    if resp.status == 200:
+                        content = await resp.read()
+                        loop = asyncio.get_running_loop()
+                        parsed = await loop.run_in_executor(None, feedparser.parse, content)
+                        if parsed and parsed.entries:
+                            return parsed
+                return await scrape_youtube_fallback(local_session, channel_id)
     except Exception:
         pass
     loop = asyncio.get_running_loop()
@@ -227,16 +237,22 @@ def check_admin_or_mod(interaction: discord.Interaction) -> bool:
 class YouTubeCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.session: aiohttp.ClientSession | None = None
         self.youtube_check_loop.start()
 
     def cog_unload(self):
         self.youtube_check_loop.cancel()
+        if self.session and not self.session.closed:
+            asyncio.create_task(self.session.close())
 
     @tasks.loop(minutes=3)
     async def youtube_check_loop(self):
         subscriptions = get_all_youtube_subscriptions()
         if not subscriptions:
             return
+
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
 
         grouped: dict[str, list[dict]] = {}
         for sub in subscriptions:
@@ -245,7 +261,7 @@ class YouTubeCog(commands.Cog):
 
         for channel_id, subs in grouped.items():
             try:
-                feed = await fetch_youtube_feed(channel_id)
+                feed = await fetch_youtube_feed(channel_id, session=self.session)
                 if not feed.entries:
                     continue
 

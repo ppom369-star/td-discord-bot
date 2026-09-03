@@ -116,20 +116,42 @@ class PostgresConnectionWrapper:
         cur.execute(query, params)
         return cur
 
+_PG_CONN = None
+
+def get_live_postgres_connection():
+    global _PG_CONN
+    if _PG_CONN is not None:
+        try:
+            if not _PG_CONN.closed:
+                return _PG_CONN
+        except Exception:
+            pass
+    _PG_CONN = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
+    return _PG_CONN
+
 @contextmanager
 def get_connection():
     if USE_POSTGRES:
-        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
+        conn = get_live_postgres_connection()
         wrapped = PostgresConnectionWrapper(conn)
         try:
             yield wrapped
             wrapped.commit()
+        except (psycopg.OperationalError, psycopg.DatabaseError) as err:
+            wrapped.rollback()
+            global _PG_CONN
+            try:
+                if _PG_CONN:
+                    _PG_CONN.close()
+            except Exception:
+                pass
+            _PG_CONN = None
+            print(f"[DB ERROR] Connection reset on PostgreSQL: {err}", file=sys.stderr, flush=True)
+            raise
         except Exception as err:
             wrapped.rollback()
             print(f"[DB ERROR] Query failed on PostgreSQL: {err}", file=sys.stderr, flush=True)
             raise
-        finally:
-            wrapped.close()
     else:
         conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
         conn.row_factory = sqlite3.Row
@@ -594,21 +616,33 @@ def delete_memo(memo_id: int, user_id: int) -> bool:
         conn.commit()
         return cursor.rowcount > 0
 
+_SETTINGS_CACHE: dict[str, str] = {}
+_SETTINGS_LOADED = False
+
+def refresh_settings_cache():
+    global _SETTINGS_LOADED, _SETTINGS_CACHE
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM settings")
+        rows = cursor.fetchall()
+        _SETTINGS_CACHE = {row["key"]: row["value"] for row in rows}
+        _SETTINGS_LOADED = True
+
 def set_setting(key: str, value: str):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value)
+            (key, str(value))
         )
         conn.commit()
+    _SETTINGS_CACHE[key] = str(value)
 
 def get_setting(key: str, default: str = None) -> str:
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        row = cursor.fetchone()
-        return row["value"] if row else default
+    global _SETTINGS_LOADED
+    if not _SETTINGS_LOADED:
+        refresh_settings_cache()
+    return _SETTINGS_CACHE.get(key, default)
 
 def set_pomodoro_session(user_id: int, channel_id: int, mode: str, end_time: datetime, work_min: int, break_min: int, cycles_done: int = 0, target_cycles: int = 4):
     with get_connection() as conn:

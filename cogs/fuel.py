@@ -7,18 +7,25 @@ from discord.ext import commands
 from database.db_manager import get_setting, set_setting
 from utils.dashboard import deliver_channel_card
 
+import time
+
 FUEL_CHANNEL_ID = 1544575570380197888
+_FUEL_CACHE: dict = {"data": None, "expires_at": 0.0}
 
 async def fetch_fuel_prices() -> dict | None:
+    now = time.time()
+    if _FUEL_CACHE["data"] is not None and now < _FUEL_CACHE["expires_at"]:
+        return _FUEL_CACHE["data"]
+
     url = "https://oil-price.bangchak.co.th/ApiOilPrice2/en"
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, timeout=10) as response:
                 if response.status != 200:
-                    return None
+                    return _FUEL_CACHE.get("data")
                 data = await response.json()
                 if not data or not isinstance(data, list):
-                    return None
+                    return _FUEL_CACHE.get("data")
                 record = data[0]
                 oil_list = json.loads(record.get("OilList", "[]"))
                 
@@ -30,12 +37,15 @@ async def fetch_fuel_prices() -> dict | None:
                         "tomorrow": float(item.get("PriceTomorrow", 0)),
                         "diff": float(item.get("PriceDifTomorrow", 0))
                     }
-                return {
+                result = {
                     "effective_text": record.get("OilRemark2", ""),
                     "fuels": fuels
                 }
+                _FUEL_CACHE["data"] = result
+                _FUEL_CACHE["expires_at"] = now + 900.0
+                return result
         except Exception:
-            return None
+            return _FUEL_CACHE.get("data")
 
 def build_fuel_embed(fuel_data: dict) -> discord.Embed:
     fuels = fuel_data.get("fuels", {})

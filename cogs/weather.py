@@ -128,7 +128,23 @@ def analyze_weather_forecast(hourly: dict, daily: dict) -> dict:
         "uv_max": uv_max
     }
 
+GEOCODE_CACHE: dict[str, dict] = {
+    "bangkok": {"latitude": 13.7563, "longitude": 100.5018, "location_name": "กรุงเทพมหานคร", "country": "ไทย"},
+    "กรุงเทพ": {"latitude": 13.7563, "longitude": 100.5018, "location_name": "กรุงเทพมหานคร", "country": "ไทย"},
+    "กรุงเทพมหานคร": {"latitude": 13.7563, "longitude": 100.5018, "location_name": "กรุงเทพมหานคร", "country": "ไทย"},
+    "lat phrao": {"latitude": 13.8034, "longitude": 100.6083, "location_name": "ลาดพร้าว", "country": "ไทย"},
+    "ลาดพร้าว": {"latitude": 13.8034, "longitude": 100.6083, "location_name": "ลาดพร้าว", "country": "ไทย"},
+    "bang na": {"latitude": 13.6682, "longitude": 100.6042, "location_name": "บางนา", "country": "ไทย"},
+    "บางนา": {"latitude": 13.6682, "longitude": 100.6042, "location_name": "บางนา", "country": "ไทย"},
+    "chiang mai": {"latitude": 18.7883, "longitude": 98.9853, "location_name": "เชียงใหม่", "country": "ไทย"},
+    "เชียงใหม่": {"latitude": 18.7883, "longitude": 98.9853, "location_name": "เชียงใหม่", "country": "ไทย"}
+}
+
 async def geocode_city(session: aiohttp.ClientSession, city: str) -> dict | None:
+    cleaned = city.strip().lower()
+    if cleaned in GEOCODE_CACHE:
+        return GEOCODE_CACHE[cleaned]
+
     geocode_url = "https://geocoding-api.open-meteo.com/v1/search"
     geocode_params = {
         "name": city,
@@ -144,12 +160,14 @@ async def geocode_city(session: aiohttp.ClientSession, city: str) -> dict | None
         if not results:
             return None
         top_result = results[0]
-        return {
+        data = {
             "latitude": top_result["latitude"],
             "longitude": top_result["longitude"],
             "location_name": top_result.get("name", city),
             "country": top_result.get("country", "")
         }
+        GEOCODE_CACHE[cleaned] = data
+        return data
 
 async def fetch_weather_report(city: str) -> dict | None:
     async with aiohttp.ClientSession() as session:

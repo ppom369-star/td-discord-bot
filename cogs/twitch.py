@@ -140,8 +140,6 @@ class TwitchCog(commands.Cog):
                     if is_live:
                         update_stream_tracker_status(t_id, is_live=0)
 
-        # คืนหน่วยความจำทันทีหลังจบลูป
-        gc.collect()
 
     @twitch_check_loop.before_loop
     async def before_twitch_loop(self):
