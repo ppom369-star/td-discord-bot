@@ -47,7 +47,7 @@ def configure_sqlite(conn: sqlite3.Connection):
         pass
 
 class PostgresCursorWrapper:
-    ID_TABLES = {"todos", "reminders", "rss_feeds", "memos", "transactions", "stream_trackers", "youtube_subscriptions", "ai_chat_history"}
+    ID_TABLES = {"todos", "reminders", "rss_feeds", "memos", "transactions", "stream_trackers", "youtube_subscriptions", "ai_chat_history", "youtube_seen_videos"}
 
     def __init__(self, cur):
         self._cur = cur
@@ -335,7 +335,15 @@ def init_db():
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );""",
-            """CREATE INDEX IF NOT EXISTS idx_ai_chat_user ON ai_chat_history(user_id, created_at);"""
+            """CREATE INDEX IF NOT EXISTS idx_ai_chat_user ON ai_chat_history(user_id, created_at);""",
+            """CREATE TABLE IF NOT EXISTS youtube_seen_videos (
+                id BIGSERIAL PRIMARY KEY,
+                subscription_id BIGINT NOT NULL,
+                video_id TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(subscription_id, video_id)
+            );""",
+            """CREATE INDEX IF NOT EXISTS idx_youtube_seen_sub ON youtube_seen_videos(subscription_id, video_id);"""
         ]
         with get_connection() as conn:
             cur = conn.cursor()
@@ -460,7 +468,16 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_chat_user ON ai_chat_history(user_id, created_at);")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS youtube_seen_videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscription_id INTEGER NOT NULL,
+                video_id TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(subscription_id, video_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_youtube_seen_sub ON youtube_seen_videos(subscription_id, video_id);")
         cursor.execute("PRAGMA table_info(youtube_subscriptions)")
         cols = [row[1] for row in cursor.fetchall()]
         if "avatar_url" not in cols:
@@ -921,15 +938,95 @@ def get_all_youtube_subscriptions() -> list[dict]:
         """)
         return [dict(row) for row in cursor.fetchall()]
 
+def get_youtube_seen_video_ids(subscription_id: int) -> set[str]:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT video_id FROM youtube_seen_videos WHERE subscription_id = ?",
+            (subscription_id,)
+        )
+        rows = cursor.fetchall()
+        result = set()
+        for r in rows:
+            val = r["video_id"] if isinstance(r, dict) else r[0]
+            result.add(val)
+        return result
+
+def add_youtube_seen_videos(subscription_id: int, video_ids: list[str]):
+    if not video_ids:
+        return
+    clean_ids = [vid.strip().replace("yt:video:", "") for vid in video_ids if vid and vid.strip()]
+    if not clean_ids:
+        return
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if USE_POSTGRES:
+            cursor.executemany(
+                "INSERT INTO youtube_seen_videos (subscription_id, video_id) VALUES (%s, %s) ON CONFLICT (subscription_id, video_id) DO NOTHING",
+                [(subscription_id, vid) for vid in clean_ids]
+            )
+            cursor.execute(
+                """
+                DELETE FROM youtube_seen_videos
+                WHERE subscription_id = %s
+                AND id NOT IN (
+                    SELECT id FROM youtube_seen_videos
+                    WHERE subscription_id = %s
+                    ORDER BY id DESC
+                    LIMIT 50
+                )
+                """,
+                (subscription_id, subscription_id)
+            )
+        else:
+            cursor.executemany(
+                "INSERT OR IGNORE INTO youtube_seen_videos (subscription_id, video_id) VALUES (?, ?)",
+                [(subscription_id, vid) for vid in clean_ids]
+            )
+            cursor.execute(
+                """
+                DELETE FROM youtube_seen_videos
+                WHERE subscription_id = ?
+                AND id NOT IN (
+                    SELECT id FROM youtube_seen_videos
+                    WHERE subscription_id = ?
+                    ORDER BY id DESC
+                    LIMIT 50
+                )
+                """,
+                (subscription_id, subscription_id)
+            )
+        conn.commit()
+
 def update_youtube_last_video(subscription_id: int, last_video_id: str):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE youtube_subscriptions SET last_video_id = ? WHERE id = ?", (last_video_id, subscription_id))
+        clean_id = last_video_id.strip().replace("yt:video:", "") if last_video_id else None
+        if clean_id:
+            if USE_POSTGRES:
+                cursor.execute(
+                    "INSERT INTO youtube_seen_videos (subscription_id, video_id) VALUES (%s, %s) ON CONFLICT (subscription_id, video_id) DO NOTHING",
+                    (subscription_id, clean_id)
+                )
+            else:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO youtube_seen_videos (subscription_id, video_id) VALUES (?, ?)",
+                    (subscription_id, clean_id)
+                )
         conn.commit()
 
 def delete_youtube_subscription(guild_id: int, youtube_channel_id: str) -> bool:
     with get_connection() as conn:
         cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM youtube_subscriptions WHERE guild_id = ? AND (youtube_channel_id = ? OR channel_title = ?)",
+            (guild_id, youtube_channel_id.strip(), youtube_channel_id.strip())
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            sid = row["id"] if isinstance(row, dict) else row[0]
+            cursor.execute("DELETE FROM youtube_seen_videos WHERE subscription_id = ?", (sid,))
         cursor.execute("DELETE FROM youtube_subscriptions WHERE guild_id = ? AND (youtube_channel_id = ? OR channel_title = ?)", (guild_id, youtube_channel_id.strip(), youtube_channel_id.strip()))
         conn.commit()
         return cursor.rowcount > 0
