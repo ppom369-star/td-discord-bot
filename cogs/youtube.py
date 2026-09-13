@@ -15,6 +15,7 @@ from database.db_manager import (
     get_guild_youtube_subscriptions,
     get_all_youtube_subscriptions,
     update_youtube_last_video,
+    update_youtube_last_live,
     update_youtube_avatar,
     delete_youtube_subscription,
     get_youtube_seen_video_ids,
@@ -164,6 +165,26 @@ async def fetch_youtube_feed(channel_id: str, session: aiohttp.ClientSession = N
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, feedparser.parse, feed_url)
 
+async def check_channel_live(session: aiohttp.ClientSession, channel_id: str) -> tuple[bool, str | None, str | None]:
+    url = f"https://www.youtube.com/channel/{channel_id}/live"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    try:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status == 200:
+                html = await resp.text()
+                canonical_m = re.search(r'<link rel="canonical" href="https://www.youtube.com/watch\?v=([a-zA-Z0-9_-]{11})">', html)
+                is_live = ('"isLive":true' in html or '"isLive": true' in html or '"liveStreamability"' in html)
+                if canonical_m and is_live:
+                    video_id = canonical_m.group(1)
+                    title_m = re.search(r'<meta property="og:title" content="([^"]+)">', html) or re.search(r'<title>(.*?)</title>', html)
+                    title = title_m.group(1) if title_m else "ถ่ายทอดสด"
+                    if title.endswith(" - YouTube"):
+                        title = title[:-10]
+                    return True, video_id, title
+    except Exception:
+        pass
+    return False, None, None
+
 async def detect_video_type(session: aiohttp.ClientSession, video_id: str, video_link: str, video_title: str) -> str:
     if "/shorts/" in video_link or "#shorts" in video_title.lower():
         return "shorts"
@@ -187,6 +208,12 @@ async def detect_video_type(session: aiohttp.ClientSession, video_id: str, video
                             '"isLive":true' in window or 
                             '"isLive": true' in window):
                             return "live"
+                        if ('"upcomingEventData"' in window or
+                            '"status":"UPCOMING"' in window or
+                            '"isUpcoming":true' in window or
+                            '"isUpcoming": true' in window or
+                            '"LIVE_STREAM_OFFLINE"' in window):
+                            return "upcoming"
         except Exception:
             pass
     return "video"
@@ -282,37 +309,6 @@ class YouTubeCog(commands.Cog):
 
         for channel_id, subs in grouped.items():
             try:
-                feed = await fetch_youtube_feed(channel_id, session=self.session)
-                if not feed.entries:
-                    continue
-
-                latest_raw_id = getattr(feed.entries[0], "yt_videoid", None) or getattr(feed.entries[0], "id", None)
-                latest_video_id = clean_video_id(latest_raw_id)
-                if not latest_video_id:
-                    continue
-
-                channel_title = feed.feed.get("title", subs[0].get("channel_title") or "YouTube Channel")
-
-                sub_seen_cache: dict[int, set[str]] = {}
-                has_any_new = False
-                for sub in subs:
-                    sub_id = sub["id"]
-                    seen_ids = get_youtube_seen_video_ids(sub_id)
-                    if not seen_ids:
-                        feed_ids = [clean_video_id(getattr(e, "yt_videoid", None) or getattr(e, "id", None)) for e in feed.entries]
-                        valid_feed_ids = [vid for vid in feed_ids if vid]
-                        add_youtube_seen_videos(sub_id, valid_feed_ids)
-                        seen_ids = set(valid_feed_ids)
-                        sub_seen_cache[sub_id] = seen_ids
-                        continue
-
-                    sub_seen_cache[sub_id] = seen_ids
-                    if latest_video_id not in seen_ids:
-                        has_any_new = True
-
-                if not has_any_new:
-                    continue
-
                 channel_avatar = subs[0].get("avatar_url")
                 is_valid = channel_avatar and "wikimedia.org" not in channel_avatar and channel_avatar != YOUTUBE_ICON
                 if not is_valid:
@@ -320,11 +316,58 @@ class YouTubeCog(commands.Cog):
                     for sub in subs:
                         update_youtube_avatar(sub["id"], channel_avatar)
 
+                channel_title = subs[0].get("channel_title") or "YouTube Channel"
+
+                is_live, live_video_id, live_title = await check_channel_live(self.session, channel_id)
+                if is_live and live_video_id:
+                    for sub in subs:
+                        sub_id = sub["id"]
+                        last_live_id = sub.get("last_live_id")
+                        guild_dest_channel_id = sub.get("alert_channel_id")
+                        if last_live_id != live_video_id and guild_dest_channel_id:
+                            dest_channel = self.bot.get_channel(guild_dest_channel_id)
+                            if not dest_channel:
+                                try:
+                                    dest_channel = await self.bot.fetch_channel(guild_dest_channel_id)
+                                except Exception:
+                                    dest_channel = None
+
+                            if dest_channel:
+                                live_entry = YouTubeFeedEntry(live_video_id, live_title or f"ถ่ายทอดสด {channel_title}")
+                                embed = build_youtube_alert_embed(live_entry, channel_title, channel_id, channel_avatar, "live")
+                                content_text = get_alert_content(channel_title, "live")
+                                try:
+                                    await dest_channel.send(content=content_text, embed=embed)
+                                except Exception as e:
+                                    print(f"[YOUTUBE LIVE ALERT ERROR] Failed to send to {guild_dest_channel_id}: {e}")
+
+                            update_youtube_last_live(sub_id, live_video_id)
+                            add_youtube_seen_videos(sub_id, [live_video_id])
+                            sub["last_live_id"] = live_video_id
+
+                feed = await fetch_youtube_feed(channel_id, session=self.session)
+                if not feed.entries:
+                    continue
+
+                if feed.feed.get("title"):
+                    channel_title = feed.feed.get("title")
+
+                latest_raw_id = getattr(feed.entries[0], "yt_videoid", None) or getattr(feed.entries[0], "id", None)
+                latest_video_id = clean_video_id(latest_raw_id)
+                if not latest_video_id:
+                    continue
+
                 for sub in subs:
                     sub_id = sub["id"]
-                    seen_ids = sub_seen_cache.get(sub_id, set())
+                    seen_ids = get_youtube_seen_video_ids(sub_id)
                     guild_dest_channel_id = sub.get("alert_channel_id")
-                    if not guild_dest_channel_id or latest_video_id in seen_ids:
+                    if not guild_dest_channel_id:
+                        continue
+
+                    if not seen_ids:
+                        feed_ids = [clean_video_id(getattr(e, "yt_videoid", None) or getattr(e, "id", None)) for e in feed.entries]
+                        valid_feed_ids = [vid for vid in feed_ids if vid]
+                        add_youtube_seen_videos(sub_id, valid_feed_ids)
                         continue
 
                     new_entries = []
@@ -336,8 +379,6 @@ class YouTubeCog(commands.Cog):
                             new_entries.append(entry)
 
                     if not new_entries:
-                        add_youtube_seen_videos(sub_id, [latest_video_id])
-                        update_youtube_last_video(sub_id, latest_video_id)
                         continue
 
                     dest_channel = self.bot.get_channel(guild_dest_channel_id)
@@ -347,27 +388,37 @@ class YouTubeCog(commands.Cog):
                         except Exception:
                             dest_channel = None
 
-                    new_entry_ids = [clean_video_id(getattr(e, "yt_videoid", None) or getattr(e, "id", None)) for e in new_entries]
-                    valid_new_ids = [vid for vid in new_entry_ids if vid]
-                    add_youtube_seen_videos(sub_id, valid_new_ids)
-                    update_youtube_last_video(sub_id, latest_video_id)
+                    session_to_use = self.session if (self.session and not self.session.closed) else aiohttp.ClientSession()
+                    processed_ids = []
+                    for new_entry in reversed(new_entries):
+                        v_id = clean_video_id(getattr(new_entry, "yt_videoid", None) or getattr(new_entry, "id", None))
+                        v_link = getattr(new_entry, "link", "")
+                        v_title = getattr(new_entry, "title", "")
+                        v_type = await detect_video_type(session_to_use, v_id, v_link, v_title)
 
-                    if dest_channel:
-                        session_to_use = self.session if (self.session and not self.session.closed) else aiohttp.ClientSession()
-                        for new_entry in reversed(new_entries):
-                            v_id = clean_video_id(getattr(new_entry, "yt_videoid", None) or getattr(new_entry, "id", None))
-                            v_link = getattr(new_entry, "link", "")
-                            v_title = getattr(new_entry, "title", "")
-                            v_type = await detect_video_type(session_to_use, v_id, v_link, v_title)
+                        if v_type == "upcoming":
+                            continue
 
+                        processed_ids.append(v_id)
+
+                        if v_type == "live":
+                            if sub.get("last_live_id") == v_id:
+                                continue
+                            update_youtube_last_live(sub_id, v_id)
+                            sub["last_live_id"] = v_id
+
+                        if dest_channel:
                             embed = build_youtube_alert_embed(new_entry, channel_title, channel_id, channel_avatar, v_type)
                             content_text = get_alert_content(channel_title, v_type)
-
                             try:
                                 await dest_channel.send(content=content_text, embed=embed)
                                 await asyncio.sleep(1)
                             except Exception as e:
                                 print(f"[YOUTUBE ALERT ERROR] Failed to send to {guild_dest_channel_id}: {e}")
+
+                    if processed_ids:
+                        add_youtube_seen_videos(sub_id, processed_ids)
+                        update_youtube_last_video(sub_id, processed_ids[-1])
 
             except Exception as err:
                 print(f"[YOUTUBE CHECK ERROR] Feed {channel_id}: {err}")

@@ -1,12 +1,18 @@
+import asyncio
 import sqlite3
 import os
 import sys
 import shutil
 from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
+from functools import partial
 from dotenv import load_dotenv
 
 load_dotenv()
+
+async def run_db(func, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
 try:
     import psycopg
@@ -324,6 +330,7 @@ def init_db():
                 youtube_channel_id TEXT NOT NULL,
                 channel_title TEXT,
                 last_video_id TEXT,
+                last_live_id TEXT,
                 avatar_url TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(guild_id, youtube_channel_id)
@@ -349,6 +356,10 @@ def init_db():
             cur = conn.cursor()
             for stmt in pg_tables:
                 cur.execute(stmt)
+            try:
+                cur.execute("ALTER TABLE youtube_subscriptions ADD COLUMN IF NOT EXISTS last_live_id TEXT;")
+            except Exception:
+                pass
             conn.commit()
         return
 
@@ -483,6 +494,11 @@ def init_db():
         if "avatar_url" not in cols:
             try:
                 cursor.execute("ALTER TABLE youtube_subscriptions ADD COLUMN avatar_url TEXT")
+            except Exception:
+                pass
+        if "last_live_id" not in cols:
+            try:
+                cursor.execute("ALTER TABLE youtube_subscriptions ADD COLUMN last_live_id TEXT")
             except Exception:
                 pass
         conn.commit()
@@ -918,6 +934,12 @@ def update_youtube_avatar(subscription_id: int, avatar_url: str):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE youtube_subscriptions SET avatar_url = ? WHERE id = ?", (avatar_url, subscription_id))
+        conn.commit()
+
+def update_youtube_last_live(subscription_id: int, last_live_id: str):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE youtube_subscriptions SET last_live_id = ? WHERE id = ?", (last_live_id, subscription_id))
         conn.commit()
 
 def get_guild_youtube_subscriptions(guild_id: int) -> list[dict]:
