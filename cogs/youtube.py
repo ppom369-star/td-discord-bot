@@ -173,15 +173,25 @@ async def check_channel_live(session: aiohttp.ClientSession, channel_id: str) ->
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
             if resp.status == 200:
                 html = await resp.text()
-                canonical_m = re.search(r'<link rel="canonical" href="https://www.youtube.com/watch\?v=([a-zA-Z0-9_-]{11})">', html)
-                is_live = ('"isLive":true' in html or '"isLive": true' in html or '"liveStreamability"' in html)
-                if canonical_m and is_live:
-                    video_id = canonical_m.group(1)
-                    title_m = re.search(r'<meta property="og:title" content="([^"]+)">', html) or re.search(r'<title>(.*?)</title>', html)
-                    title = title_m.group(1) if title_m else "ถ่ายทอดสด"
-                    if title.endswith(" - YouTube"):
-                        title = title[:-10]
-                    return True, video_id, title
+                is_live = ('"isLive":true' in html or '"isLive": true' in html or '"isLiveNow":true' in html or '"isLiveNow": true' in html)
+                if is_live:
+                    vid_m = (
+                        re.search(r'<link rel="canonical" href="https://www.youtube.com/watch\?v=([a-zA-Z0-9_-]{11})">', html)
+                        or re.search(r'"updatedMetadataEndpoint":\s*\{"videoId":\s*"([a-zA-Z0-9_-]{11})"', html)
+                        or re.search(r'live_chat\?is_popout=1(?:\\u0026|&)v=([a-zA-Z0-9_-]{11})', html)
+                        or re.search(r'"target":\s*\{"videoId":\s*"([a-zA-Z0-9_-]{11})"', html)
+                    )
+                    if vid_m:
+                        video_id = vid_m.group(1)
+                        title_m = (
+                            re.search(r'"videoPrimaryInfoRenderer":\{"title":\{"runs":\[\{"text":"(.*?)"\}\]', html)
+                            or re.search(r'<meta property="og:title" content="([^"]+)">', html)
+                            or re.search(r'<title>(.*?)</title>', html)
+                        )
+                        title = title_m.group(1) if title_m else "ถ่ายทอดสด"
+                        if title.endswith(" - YouTube"):
+                            title = title[:-10]
+                        return True, video_id, title
     except Exception:
         pass
     return False, None, None
