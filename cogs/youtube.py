@@ -115,8 +115,9 @@ class YouTubeFeedEntry:
         self.link = f"https://www.youtube.com/watch?v={video_id}"
 
 class YouTubeFeedResult:
-    def __init__(self, entries):
+    def __init__(self, entries, feed=None):
         self.entries = entries
+        self.feed = feed if feed is not None else {}
 
 async def scrape_youtube_fallback(session: aiohttp.ClientSession, channel_id: str) -> YouTubeFeedResult:
     url = f"https://www.youtube.com/channel/{channel_id}/videos"
@@ -132,10 +133,10 @@ async def scrape_youtube_fallback(session: aiohttp.ClientSession, channel_id: st
                     if v not in seen:
                         seen.add(v)
                         entries.append(YouTubeFeedEntry(v, "คลิปใหม่"))
-                return YouTubeFeedResult(entries)
+                return YouTubeFeedResult(entries, {"title": ""})
     except Exception:
         pass
-    return YouTubeFeedResult([])
+    return YouTubeFeedResult([], {"title": ""})
 
 async def fetch_youtube_feed(channel_id: str, session: aiohttp.ClientSession = None):
     feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
@@ -349,8 +350,9 @@ class YouTubeCog(commands.Cog):
                 if not feed.entries:
                     continue
 
-                if feed.feed.get("title"):
-                    channel_title = feed.feed.get("title")
+                feed_meta = getattr(feed, "feed", None)
+                if feed_meta and hasattr(feed_meta, "get") and feed_meta.get("title"):
+                    channel_title = feed_meta.get("title")
 
                 latest_raw_id = getattr(feed.entries[0], "yt_videoid", None) or getattr(feed.entries[0], "id", None)
                 latest_video_id = clean_video_id(latest_raw_id)
@@ -484,15 +486,16 @@ class YouTubeCog(commands.Cog):
             )
             return
 
-        feed = await fetch_youtube_feed(channel_id)
-        if not feed.entries and not feed.feed.get("title"):
+        feed_meta = getattr(feed, "feed", None)
+        feed_title = feed_meta.get("title") if feed_meta and hasattr(feed_meta, "get") else None
+        if not feed.entries and not feed_title:
             await interaction.followup.send(
                 f"❌ ไม่สามารถดึงข้อมูล Feed จากช่อง ID `{channel_id}` ได้ กรุณาตรวจสอบความถูกต้องของช่อง",
                 ephemeral=True
             )
             return
 
-        channel_title = feed.feed.get("title", channel_id)
+        channel_title = feed_title or channel_id
         latest_video_id = None
         if feed.entries:
             latest_raw_id = getattr(feed.entries[0], "yt_videoid", None) or getattr(feed.entries[0], "id", None)
