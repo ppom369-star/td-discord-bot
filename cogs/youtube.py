@@ -201,6 +201,15 @@ async def detect_video_type(session: aiohttp.ClientSession, video_id: str, video
         return "shorts"
 
     if video_id:
+        try:
+            shorts_url = f"https://www.youtube.com/shorts/{video_id}"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with session.head(shorts_url, headers=headers, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=5)) as s_resp:
+                if s_resp.status == 200:
+                    return "shorts"
+        except Exception:
+            pass
+
         url = f"https://www.youtube.com/watch?v={video_id}"
         headers = {"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"}
         try:
@@ -306,137 +315,150 @@ class YouTubeCog(commands.Cog):
 
     @tasks.loop(minutes=3)
     async def youtube_check_loop(self):
-        subscriptions = get_all_youtube_subscriptions()
-        if not subscriptions:
-            return
+        try:
+            subscriptions = get_all_youtube_subscriptions()
+            if not subscriptions:
+                return
 
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+            if self.session is None or self.session.closed:
+                self.session = aiohttp.ClientSession()
 
-        grouped: dict[str, list[dict]] = {}
-        for sub in subscriptions:
-            c_id = sub["youtube_channel_id"]
-            grouped.setdefault(c_id, []).append(sub)
+            grouped: dict[str, list[dict]] = {}
+            for sub in subscriptions:
+                c_id = sub["youtube_channel_id"]
+                grouped.setdefault(c_id, []).append(sub)
 
-        for channel_id, subs in grouped.items():
-            try:
-                channel_avatar = subs[0].get("avatar_url")
-                is_valid = channel_avatar and "wikimedia.org" not in channel_avatar and channel_avatar != YOUTUBE_ICON
-                if not is_valid:
-                    channel_avatar = await fetch_channel_avatar(channel_id)
-                    for sub in subs:
-                        update_youtube_avatar(sub["id"], channel_avatar)
+            for channel_id, subs in grouped.items():
+                try:
+                    channel_avatar = subs[0].get("avatar_url")
+                    is_valid = channel_avatar and "wikimedia.org" not in channel_avatar and channel_avatar != YOUTUBE_ICON
+                    if not is_valid:
+                        channel_avatar = await fetch_channel_avatar(channel_id)
+                        for sub in subs:
+                            update_youtube_avatar(sub["id"], channel_avatar)
 
-                channel_title = subs[0].get("channel_title") or "YouTube Channel"
+                    channel_title = subs[0].get("channel_title") or "YouTube Channel"
 
-                is_live, live_video_id, live_title = await check_channel_live(self.session, channel_id)
-                if is_live and live_video_id:
+                    is_live, live_video_id, live_title = await check_channel_live(self.session, channel_id)
+                    if is_live and live_video_id:
+                        for sub in subs:
+                            sub_id = sub["id"]
+                            last_live_id = sub.get("last_live_id")
+                            guild_dest_channel_id = sub.get("alert_channel_id")
+                            if last_live_id != live_video_id and guild_dest_channel_id:
+                                dest_channel = self.bot.get_channel(guild_dest_channel_id)
+                                if not dest_channel:
+                                    try:
+                                        dest_channel = await self.bot.fetch_channel(guild_dest_channel_id)
+                                    except Exception:
+                                        dest_channel = None
+
+                                if dest_channel:
+                                    live_entry = YouTubeFeedEntry(live_video_id, live_title or f"ถ่ายทอดสด {channel_title}")
+                                    embed = build_youtube_alert_embed(live_entry, channel_title, channel_id, channel_avatar, "live")
+                                    content_text = get_alert_content(channel_title, "live")
+                                    try:
+                                        await dest_channel.send(content=content_text, embed=embed)
+                                    except Exception as e:
+                                        print(f"[YOUTUBE LIVE ALERT ERROR] Failed to send to {guild_dest_channel_id}: {e}")
+
+                                update_youtube_last_live(sub_id, live_video_id)
+                                add_youtube_seen_videos(sub_id, [live_video_id])
+                                sub["last_live_id"] = live_video_id
+
+                    feed = await fetch_youtube_feed(channel_id, session=self.session)
+                    if not feed.entries:
+                        continue
+
+                    feed_meta = getattr(feed, "feed", None)
+                    if feed_meta and hasattr(feed_meta, "get") and feed_meta.get("title"):
+                        channel_title = feed_meta.get("title")
+
+                    latest_raw_id = getattr(feed.entries[0], "yt_videoid", None) or getattr(feed.entries[0], "id", None)
+                    latest_video_id = clean_video_id(latest_raw_id)
+                    if not latest_video_id:
+                        continue
+
                     for sub in subs:
                         sub_id = sub["id"]
-                        last_live_id = sub.get("last_live_id")
+                        seen_ids = get_youtube_seen_video_ids(sub_id)
                         guild_dest_channel_id = sub.get("alert_channel_id")
-                        if last_live_id != live_video_id and guild_dest_channel_id:
-                            dest_channel = self.bot.get_channel(guild_dest_channel_id)
-                            if not dest_channel:
-                                try:
-                                    dest_channel = await self.bot.fetch_channel(guild_dest_channel_id)
-                                except Exception:
-                                    dest_channel = None
-
-                            if dest_channel:
-                                live_entry = YouTubeFeedEntry(live_video_id, live_title or f"ถ่ายทอดสด {channel_title}")
-                                embed = build_youtube_alert_embed(live_entry, channel_title, channel_id, channel_avatar, "live")
-                                content_text = get_alert_content(channel_title, "live")
-                                try:
-                                    await dest_channel.send(content=content_text, embed=embed)
-                                except Exception as e:
-                                    print(f"[YOUTUBE LIVE ALERT ERROR] Failed to send to {guild_dest_channel_id}: {e}")
-
-                            update_youtube_last_live(sub_id, live_video_id)
-                            add_youtube_seen_videos(sub_id, [live_video_id])
-                            sub["last_live_id"] = live_video_id
-
-                feed = await fetch_youtube_feed(channel_id, session=self.session)
-                if not feed.entries:
-                    continue
-
-                feed_meta = getattr(feed, "feed", None)
-                if feed_meta and hasattr(feed_meta, "get") and feed_meta.get("title"):
-                    channel_title = feed_meta.get("title")
-
-                latest_raw_id = getattr(feed.entries[0], "yt_videoid", None) or getattr(feed.entries[0], "id", None)
-                latest_video_id = clean_video_id(latest_raw_id)
-                if not latest_video_id:
-                    continue
-
-                for sub in subs:
-                    sub_id = sub["id"]
-                    seen_ids = get_youtube_seen_video_ids(sub_id)
-                    guild_dest_channel_id = sub.get("alert_channel_id")
-                    if not guild_dest_channel_id:
-                        continue
-
-                    if not seen_ids:
-                        feed_ids = [clean_video_id(getattr(e, "yt_videoid", None) or getattr(e, "id", None)) for e in feed.entries]
-                        valid_feed_ids = [vid for vid in feed_ids if vid]
-                        add_youtube_seen_videos(sub_id, valid_feed_ids)
-                        continue
-
-                    new_entries = []
-                    for entry in feed.entries:
-                        v_id = clean_video_id(getattr(entry, "yt_videoid", None) or getattr(entry, "id", None))
-                        if not v_id or v_id in seen_ids:
-                            break
-                        if is_entry_recent(entry):
-                            new_entries.append(entry)
-
-                    if not new_entries:
-                        continue
-
-                    dest_channel = self.bot.get_channel(guild_dest_channel_id)
-                    if not dest_channel:
-                        try:
-                            dest_channel = await self.bot.fetch_channel(guild_dest_channel_id)
-                        except Exception:
-                            dest_channel = None
-
-                    session_to_use = self.session if (self.session and not self.session.closed) else aiohttp.ClientSession()
-                    processed_ids = []
-                    for new_entry in reversed(new_entries):
-                        v_id = clean_video_id(getattr(new_entry, "yt_videoid", None) or getattr(new_entry, "id", None))
-                        v_link = getattr(new_entry, "link", "")
-                        v_title = getattr(new_entry, "title", "")
-                        v_type = await detect_video_type(session_to_use, v_id, v_link, v_title)
-
-                        if v_type == "upcoming":
+                        if not guild_dest_channel_id:
                             continue
 
-                        processed_ids.append(v_id)
+                        if not seen_ids:
+                            feed_ids = [clean_video_id(getattr(e, "yt_videoid", None) or getattr(e, "id", None)) for e in feed.entries]
+                            valid_feed_ids = [vid for vid in feed_ids if vid]
+                            add_youtube_seen_videos(sub_id, valid_feed_ids)
+                            continue
 
-                        if v_type == "live":
-                            if sub.get("last_live_id") == v_id:
-                                continue
-                            update_youtube_last_live(sub_id, v_id)
-                            sub["last_live_id"] = v_id
+                        new_entries = []
+                        for entry in feed.entries:
+                            v_id = clean_video_id(getattr(entry, "yt_videoid", None) or getattr(entry, "id", None))
+                            if not v_id or v_id in seen_ids:
+                                break
+                            if is_entry_recent(entry):
+                                new_entries.append(entry)
 
-                        if dest_channel:
-                            embed = build_youtube_alert_embed(new_entry, channel_title, channel_id, channel_avatar, v_type)
-                            content_text = get_alert_content(channel_title, v_type)
+                        if not new_entries:
+                            continue
+
+                        dest_channel = self.bot.get_channel(guild_dest_channel_id)
+                        if not dest_channel:
                             try:
-                                await dest_channel.send(content=content_text, embed=embed)
-                                await asyncio.sleep(1)
-                            except Exception as e:
-                                print(f"[YOUTUBE ALERT ERROR] Failed to send to {guild_dest_channel_id}: {e}")
+                                dest_channel = await self.bot.fetch_channel(guild_dest_channel_id)
+                            except Exception:
+                                dest_channel = None
 
-                    if processed_ids:
-                        add_youtube_seen_videos(sub_id, processed_ids)
-                        update_youtube_last_video(sub_id, processed_ids[-1])
+                        session_to_use = self.session if (self.session and not self.session.closed) else aiohttp.ClientSession()
+                        processed_ids = []
+                        for new_entry in reversed(new_entries):
+                            v_id = clean_video_id(getattr(new_entry, "yt_videoid", None) or getattr(new_entry, "id", None))
+                            v_link = getattr(new_entry, "link", "")
+                            v_title = getattr(new_entry, "title", "")
+                            v_type = await detect_video_type(session_to_use, v_id, v_link, v_title)
 
-            except Exception as err:
-                print(f"[YOUTUBE CHECK ERROR] Feed {channel_id}: {err}")
-                continue
+                            if v_type == "upcoming":
+                                continue
 
-        gc.collect()
+                            processed_ids.append(v_id)
+
+                            if v_type == "live":
+                                if sub.get("last_live_id") == v_id:
+                                    continue
+                                update_youtube_last_live(sub_id, v_id)
+                                sub["last_live_id"] = v_id
+
+                            if dest_channel:
+                                embed = build_youtube_alert_embed(new_entry, channel_title, channel_id, channel_avatar, v_type)
+                                content_text = get_alert_content(channel_title, v_type)
+                                try:
+                                    await dest_channel.send(content=content_text, embed=embed)
+                                    await asyncio.sleep(1)
+                                except Exception as e:
+                                    print(f"[YOUTUBE ALERT ERROR] Failed to send to {guild_dest_channel_id}: {e}")
+
+                        if processed_ids:
+                            add_youtube_seen_videos(sub_id, processed_ids)
+                            update_youtube_last_video(sub_id, processed_ids[-1])
+
+                except Exception as err:
+                    print(f"[YOUTUBE CHECK ERROR] Feed {channel_id}: {err}")
+                    continue
+
+            gc.collect()
+        except Exception as loop_err:
+            print(f"[YOUTUBE LOOP CRITICAL ERROR] {loop_err}", flush=True)
+
+    @youtube_check_loop.error
+    async def on_youtube_loop_error(self, error):
+        print(f"[YOUTUBE TASK LOOP ERROR] {error}", flush=True)
+        await asyncio.sleep(5)
+        if not self.youtube_check_loop.is_running():
+            try:
+                self.youtube_check_loop.restart()
+            except Exception:
+                pass
 
     @youtube_check_loop.before_loop
     async def before_youtube_loop(self):

@@ -129,9 +129,14 @@ def get_live_postgres_connection():
     if _PG_CONN is not None:
         try:
             if not _PG_CONN.closed:
+                _PG_CONN.execute("SELECT 1;")
                 return _PG_CONN
         except Exception:
-            pass
+            try:
+                _PG_CONN.close()
+            except Exception:
+                pass
+            _PG_CONN = None
     _PG_CONN = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
     return _PG_CONN
 
@@ -144,7 +149,10 @@ def get_connection():
             yield wrapped
             wrapped.commit()
         except (psycopg.OperationalError, psycopg.DatabaseError) as err:
-            wrapped.rollback()
+            try:
+                wrapped.rollback()
+            except Exception:
+                pass
             global _PG_CONN
             try:
                 if _PG_CONN:
@@ -155,7 +163,10 @@ def get_connection():
             print(f"[DB ERROR] Connection reset on PostgreSQL: {err}", file=sys.stderr, flush=True)
             raise
         except Exception as err:
-            wrapped.rollback()
+            try:
+                wrapped.rollback()
+            except Exception:
+                pass
             print(f"[DB ERROR] Query failed on PostgreSQL: {err}", file=sys.stderr, flush=True)
             raise
     else:

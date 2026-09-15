@@ -95,51 +95,63 @@ class TwitchCog(commands.Cog):
 
     @tasks.loop(minutes=3)
     async def twitch_check_loop(self):
-        trackers = get_stream_trackers(platform="twitch")
-        if not trackers:
-            return
+        try:
+            trackers = get_stream_trackers(platform="twitch")
+            if not trackers:
+                return
 
-        target_user_id = int(get_setting("briefing_target_user_id") or DEFAULT_USER_ID)
+            target_user_id = int(get_setting("briefing_target_user_id") or DEFAULT_USER_ID)
 
-        async with aiohttp.ClientSession() as session:
-            for item in trackers:
-                t_id = item["id"]
-                login = item["channel_login"]
-                dest_id = item["destination_channel_id"]
-                last_id = item.get("last_stream_id")
-                is_live = item.get("is_live", 0)
+            async with aiohttp.ClientSession() as session:
+                for item in trackers:
+                    t_id = item["id"]
+                    login = item["channel_login"]
+                    dest_id = item["destination_channel_id"]
+                    last_id = item.get("last_stream_id")
+                    is_live = item.get("is_live", 0)
 
-                user_data = await fetch_twitch_user(session, login)
-                if not user_data:
-                    continue
+                    user_data = await fetch_twitch_user(session, login)
+                    if not user_data:
+                        continue
 
-                stream = user_data.get("stream")
-                display_name = user_data.get("displayName") or login
+                    stream = user_data.get("stream")
+                    display_name = user_data.get("displayName") or login
 
-                if stream:
-                    stream_id = stream.get("id")
-                    if stream_id != last_id:
-                        update_stream_tracker_status(t_id, is_live=1, last_stream_id=stream_id)
-                        dest_channel = self.bot.get_channel(dest_id)
-                        if not dest_channel:
-                            try:
-                                dest_channel = await self.bot.fetch_channel(dest_id)
-                            except Exception:
-                                dest_channel = None
+                    if stream:
+                        stream_id = stream.get("id")
+                        if stream_id != last_id:
+                            update_stream_tracker_status(t_id, is_live=1, last_stream_id=stream_id)
+                            dest_channel = self.bot.get_channel(dest_id)
+                            if not dest_channel:
+                                try:
+                                    dest_channel = await self.bot.fetch_channel(dest_id)
+                                except Exception:
+                                    dest_channel = None
 
-                        if dest_channel:
-                            embed = build_twitch_live_embed(user_data)
-                            await dest_channel.send(
-                                content=f"🔔 <@{target_user_id}> **{display_name} (@{login}) กำลังถ่ายทอดสดบน Twitch! 🔴**",
-                                embed=embed
-                            )
+                            if dest_channel:
+                                embed = build_twitch_live_embed(user_data)
+                                await dest_channel.send(
+                                    content=f"🔔 <@{target_user_id}> **{display_name} (@{login}) กำลังถ่ายทอดสดบน Twitch! 🔴**",
+                                    embed=embed
+                                )
+                        else:
+                            if not is_live:
+                                update_stream_tracker_status(t_id, is_live=1)
                     else:
-                        if not is_live:
-                            update_stream_tracker_status(t_id, is_live=1)
-                else:
-                    if is_live:
-                        update_stream_tracker_status(t_id, is_live=0)
+                        if is_live:
+                            update_stream_tracker_status(t_id, is_live=0)
+        except Exception as loop_err:
+            print(f"[TWITCH LOOP CRITICAL ERROR] {loop_err}", flush=True)
 
+    @twitch_check_loop.error
+    async def on_twitch_loop_error(self, error):
+        print(f"[TWITCH TASK LOOP ERROR] {error}", flush=True)
+        await asyncio.sleep(5)
+        if not self.twitch_check_loop.is_running():
+            try:
+                self.twitch_check_loop.restart()
+            except Exception:
+                pass
 
     @twitch_check_loop.before_loop
     async def before_twitch_loop(self):
