@@ -170,7 +170,9 @@ class TikTokCog(commands.Cog):
         avatar_url = None
         client = TikTokLiveClient(unique_id=clean_user)
         try:
-            avatar_url = client.get_avatar_url()
+            fetched_avatar = await client.get_avatar_url()
+            if isinstance(fetched_avatar, str) and fetched_avatar.startswith("http"):
+                avatar_url = fetched_avatar
         except Exception:
             avatar_url = None
 

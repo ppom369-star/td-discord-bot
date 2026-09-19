@@ -1121,6 +1121,7 @@ def clear_ai_chat_history(user_id: int) -> int:
 
 def add_tiktok_subscription(guild_id: int, tiktok_username: str, nickname: str, alert_channel_id: int, avatar_url: str = None) -> int:
     clean_user = tiktok_username.strip().lstrip("@").lower()
+    safe_avatar = avatar_url if isinstance(avatar_url, str) else None
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1132,7 +1133,7 @@ def add_tiktok_subscription(guild_id: int, tiktok_username: str, nickname: str, 
                 alert_channel_id = excluded.alert_channel_id,
                 avatar_url = COALESCE(excluded.avatar_url, tiktok_subscriptions.avatar_url)
             """,
-            (guild_id, clean_user, nickname, alert_channel_id, avatar_url)
+            (guild_id, clean_user, nickname, alert_channel_id, safe_avatar)
         )
         conn.commit()
         return cursor.lastrowid
