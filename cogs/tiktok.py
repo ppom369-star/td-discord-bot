@@ -218,7 +218,7 @@ class TikTokCog(commands.Cog):
                             should_alert = True
                         elif last_id in (None, "", "live_now"):
                             should_alert = True
-                        elif room_id and last_id and room_id != last_id:
+                        elif room_id and last_id and not str(last_id).startswith("live_alerted_") and room_id != last_id:
                             should_alert = True
 
                         if should_alert:
@@ -244,7 +244,9 @@ class TikTokCog(commands.Cog):
                                 except Exception as send_err:
                                     print(f"[TIKTOK LIVE SEND ERROR] Channel {dest_channel_id}: {send_err}", flush=True)
                         else:
-                            if not current_live:
+                            if room_id and str(last_id).startswith("live_alerted_"):
+                                update_tiktok_live_status(sub_id, is_live=1, last_room_id=room_id, avatar_url=avatar_url)
+                            elif not current_live:
                                 update_tiktok_live_status(sub_id, is_live=1)
                     else:
                         if current_live:
