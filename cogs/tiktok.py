@@ -36,7 +36,8 @@ async def fetch_tiktok_oembed(username: str) -> dict | None:
     return None
 
 async def check_tiktok_live_status(username: str) -> tuple[bool, str | None, str | None, str | None]:
-    client = TikTokLiveClient(unique_id=username)
+    clean_user = username.strip().lstrip("@").lower()
+    client = TikTokLiveClient(unique_id=clean_user)
     try:
         is_live = await client.is_live()
         room_id = str(client.room_id) if client.room_id else None
@@ -50,6 +51,20 @@ async def check_tiktok_live_status(username: str) -> tuple[bool, str | None, str
             except Exception:
                 live_avatar = None
             try:
+                if hasattr(client, "web"):
+                    if hasattr(client.web, "fetch_room_id_from_html"):
+                        r_id = await client.web.fetch_room_id_from_html(clean_user)
+                        if r_id:
+                            room_id = str(r_id)
+                            client.web.params["room_id"] = room_id
+                    elif hasattr(client.web, "fetch_room_id_from_api"):
+                        r_id = await client.web.fetch_room_id_from_api(clean_user)
+                        if r_id:
+                            room_id = str(r_id)
+                            client.web.params["room_id"] = room_id
+            except Exception:
+                pass
+            try:
                 room_info = await client.web.fetch_room_info()
                 if isinstance(room_info, dict):
                     title = room_info.get("title")
@@ -62,11 +77,12 @@ async def check_tiktok_live_status(username: str) -> tuple[bool, str | None, str
             except Exception:
                 title = None
         return is_live, room_id, title, live_avatar
-    except Exception:
+    except Exception as err:
+        print(f"[TIKTOK LIVE CHECK ERROR] {clean_user}: {err}", flush=True)
         return False, None, None, None
 
 def build_tiktok_live_embed(username: str, nickname: str, room_id: str | None, title: str | None, avatar_url: str | None) -> discord.Embed:
-    stream_title = title or f"{nickname} กำลัง Live อยู่ในขณะนี้!"
+    stream_title = title or f"{nickname} กำลังถ่ายทอดสด!"
     stream_url = f"https://www.tiktok.com/@{username}/live"
 
     embed = discord.Embed(
@@ -77,15 +93,15 @@ def build_tiktok_live_embed(username: str, nickname: str, room_id: str | None, t
     )
     author_icon = avatar_url or TIKTOK_ICON
     embed.set_author(
-        name=f"{nickname} (@{username}) กำลังถ่ายทอดสดบน TikTok!",
+        name=f"{nickname} กำลังถ่ายทอดสด!",
         icon_url=author_icon,
-        url=stream_url
+        url=f"https://www.tiktok.com/@{username}"
     )
     if avatar_url:
         embed.set_thumbnail(url=avatar_url)
 
-    embed.add_field(name="🔴 สถานะ", value="`กำลัง Live สด`", inline=True)
-    if room_id:
+    embed.add_field(name="📌 ประเภท", value="`🔴 ถ่ายทอดสด`", inline=False)
+    if room_id and room_id != "live_now":
         embed.add_field(name="🆔 Room ID", value=f"`{room_id}`", inline=True)
     embed.add_field(name="🔗 ลิงก์รับชม", value=f"[คลิกเพื่อเข้าชมไลฟ์]({stream_url})", inline=False)
     embed.set_footer(text="TD TikTok Live Alert", icon_url=TIKTOK_ICON)
@@ -146,14 +162,16 @@ def build_tiktok_video_embed(username: str, nickname: str, video_title: str, vid
     )
     author_icon = avatar_url or TIKTOK_ICON
     embed.set_author(
-        name=f"{nickname} (@{username}) โพสต์คลิปใหม่บน TikTok! 🎬",
+        name=f"{nickname} อัปโหลดคลิปใหม่!",
         icon_url=author_icon,
         url=f"https://www.tiktok.com/@{username}"
     )
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
+
+    embed.add_field(name="📌 ประเภท", value="`🎬 วิดีโอ (TikTok)`", inline=False)
     if thumbnail_url:
         embed.set_image(url=thumbnail_url)
-    elif avatar_url:
-        embed.set_thumbnail(url=avatar_url)
 
     embed.add_field(name="🔗 ลิงก์รับชม", value=f"[คลิกเพื่อรับชมคลิปบน TikTok]({video_url})", inline=False)
     embed.set_footer(text="TD TikTok Video Alert", icon_url=TIKTOK_ICON)
@@ -194,8 +212,18 @@ class TikTokCog(commands.Cog):
 
                     if is_live:
                         effective_room_id = room_id or "live_now"
-                        if effective_room_id != last_id:
-                            update_tiktok_live_status(sub_id, is_live=1, last_room_id=effective_room_id, avatar_url=avatar_url)
+                        should_alert = False
+
+                        if not current_live:
+                            should_alert = True
+                        elif last_id in (None, "", "live_now"):
+                            should_alert = True
+                        elif room_id and last_id and room_id != last_id:
+                            should_alert = True
+
+                        if should_alert:
+                            alert_marker = room_id or f"live_alerted_{int(datetime.now().timestamp())}"
+                            update_tiktok_live_status(sub_id, is_live=1, last_room_id=alert_marker, avatar_url=avatar_url)
                             dest_channel = self.bot.get_channel(dest_channel_id)
                             if not dest_channel:
                                 try:
@@ -206,16 +234,21 @@ class TikTokCog(commands.Cog):
                             if dest_channel:
                                 embed = build_tiktok_live_embed(username, nickname, room_id, title, avatar_url)
                                 stream_url = f"https://www.tiktok.com/@{username}/live"
-                                await dest_channel.send(
-                                    content=f"🔔 **{nickname} (@{username}) กำลังถ่ายทอดสดบน TikTok! 🔴**\n{stream_url}",
-                                    embed=embed
-                                )
+                                content_text = f"🔴 @everyone **{nickname}** กำลังถ่ายทอดสดบน TikTok! 🔴\n{stream_url}"
+                                try:
+                                    await dest_channel.send(
+                                        content=content_text,
+                                        embed=embed,
+                                        allowed_mentions=discord.AllowedMentions(everyone=True)
+                                    )
+                                except Exception as send_err:
+                                    print(f"[TIKTOK LIVE SEND ERROR] Channel {dest_channel_id}: {send_err}", flush=True)
                         else:
                             if not current_live:
                                 update_tiktok_live_status(sub_id, is_live=1)
                     else:
                         if current_live:
-                            update_tiktok_live_status(sub_id, is_live=0)
+                            update_tiktok_live_status(sub_id, is_live=0, last_room_id="")
 
                     rss_url = sub.get("rss_url")
                     if rss_url:
@@ -247,10 +280,15 @@ class TikTokCog(commands.Cog):
                                         thumbnail_url=rss_data["thumbnail"],
                                         avatar_url=avatar_url
                                     )
-                                    await dest_channel.send(
-                                        content=f"🔔 **{nickname} (@{username}) ได้โพสต์คลิปใหม่บน TikTok! 🎬**\n{rss_data['url']}",
-                                        embed=embed
-                                    )
+                                    content_text = f"🔔 @everyone **{nickname}** อัปโหลดคลิปใหม่บน TikTok! 🎬\n{rss_data['url']}"
+                                    try:
+                                        await dest_channel.send(
+                                            content=content_text,
+                                            embed=embed,
+                                            allowed_mentions=discord.AllowedMentions(everyone=True)
+                                        )
+                                    except Exception as send_err:
+                                        print(f"[TIKTOK VIDEO SEND ERROR] Channel {dest_channel_id}: {send_err}", flush=True)
 
                 await asyncio.sleep(1)
 
@@ -431,6 +469,47 @@ class TikTokCog(commands.Cog):
 
         embed.set_footer(text="TD TikTok Live Checker", icon_url=TIKTOK_ICON)
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @tiktok_group.command(name="test", description="ทดสอบส่งการแจ้งเตือน TikTok Live ไปยังห้องแจ้งเตือน (ส่งจริง)")
+    @app_commands.describe(username="ชื่อบัญชี TikTok ที่ต้องการทดสอบ")
+    async def tiktok_test(self, interaction: discord.Interaction, username: str):
+        await interaction.response.defer(ephemeral=True)
+        clean_user = username.strip().lstrip("@").lower()
+        subs = get_guild_tiktok_subscriptions(interaction.guild_id)
+        target_sub = next((s for s in subs if s["tiktok_username"] == clean_user), None)
+
+        default_channel_id = get_guild_tiktok_channel(interaction.guild_id)
+        dest_channel_id = (target_sub["alert_channel_id"] if target_sub else None) or default_channel_id
+        if not dest_channel_id:
+            dest_channel = interaction.channel
+        else:
+            dest_channel = self.bot.get_channel(dest_channel_id)
+            if not dest_channel:
+                try:
+                    dest_channel = await self.bot.fetch_channel(dest_channel_id)
+                except Exception:
+                    dest_channel = None
+
+        if not dest_channel:
+            await interaction.followup.send("❌ ไม่พบห้องแจ้งเตือน กรุณาตั้งค่าห้องด้วย `/tiktok setup` ก่อน", ephemeral=True)
+            return
+
+        nickname = (target_sub.get("nickname") if target_sub else None) or clean_user
+        avatar_url = target_sub.get("avatar_url") if target_sub else None
+
+        embed = build_tiktok_live_embed(clean_user, nickname, "test_room_12345", f"ถ่ายทอดสด {nickname}", avatar_url)
+        stream_url = f"https://www.tiktok.com/@{clean_user}/live"
+        content_text = f"🔴 @everyone **{nickname}** กำลังถ่ายทอดสดบน TikTok! 🔴\n{stream_url}"
+
+        try:
+            await dest_channel.send(
+                content=content_text,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(everyone=True)
+            )
+            await interaction.followup.send(f"✅ ส่งข้อความทดสอบไปยังห้อง {dest_channel.mention} เรียบร้อยแล้ว", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ ส่งข้อความทดสอบไม่สำเร็จ: {e}", ephemeral=True)
 
     @tiktok_group.command(name="feed", description="เชื่อมต่อ RSS Feed สำหรับแจ้งเตือนคลิปใหม่ของ TikTok")
     @app_commands.describe(
