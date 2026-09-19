@@ -381,6 +381,7 @@ def init_db():
                 cur.execute(stmt)
             try:
                 cur.execute("ALTER TABLE youtube_subscriptions ADD COLUMN IF NOT EXISTS last_live_id TEXT;")
+                cur.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS tiktok_channel_id BIGINT;")
             except Exception:
                 pass
             conn.commit()
@@ -536,6 +537,13 @@ def init_db():
         if "last_live_id" not in cols:
             try:
                 cursor.execute("ALTER TABLE youtube_subscriptions ADD COLUMN last_live_id TEXT")
+            except Exception:
+                pass
+        cursor.execute("PRAGMA table_info(guild_settings)")
+        guild_cols = [row[1] for row in cursor.fetchall()]
+        if "tiktok_channel_id" not in guild_cols:
+            try:
+                cursor.execute("ALTER TABLE guild_settings ADD COLUMN tiktok_channel_id INTEGER")
             except Exception:
                 pass
         conn.commit()
@@ -1182,6 +1190,35 @@ def delete_tiktok_subscription(guild_id: int, tiktok_username: str) -> bool:
         cursor.execute("DELETE FROM tiktok_subscriptions WHERE guild_id = ? AND tiktok_username = ?", (guild_id, clean_user))
         conn.commit()
         return cursor.rowcount > 0
+
+def set_guild_tiktok_channel(guild_id: int, channel_id: int):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO guild_settings (guild_id, youtube_channel_id, tiktok_channel_id, is_active)
+            VALUES (?, '', ?, 1)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                tiktok_channel_id = excluded.tiktok_channel_id
+            """,
+            (guild_id, channel_id)
+        )
+        cursor.execute(
+            "UPDATE tiktok_subscriptions SET alert_channel_id = ? WHERE guild_id = ?",
+            (channel_id, guild_id)
+        )
+        conn.commit()
+
+def get_guild_tiktok_channel(guild_id: int) -> int | None:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT tiktok_channel_id FROM guild_settings WHERE guild_id = ?", (guild_id,))
+        row = cursor.fetchone()
+        if row:
+            val = row["tiktok_channel_id"] if isinstance(row, dict) else row[0]
+            return int(val) if val else None
+        return None
+
 
 
 

@@ -12,7 +12,9 @@ from database.db_manager import (
     get_guild_tiktok_subscriptions,
     get_all_tiktok_subscriptions,
     update_tiktok_live_status,
-    delete_tiktok_subscription
+    delete_tiktok_subscription,
+    set_guild_tiktok_channel,
+    get_guild_tiktok_channel
 )
 
 TIKTOK_COLOR = discord.Color.from_rgb(254, 44, 85)
@@ -82,7 +84,7 @@ class TikTokCog(commands.Cog):
     def cog_unload(self):
         self.tiktok_check_loop.cancel()
 
-    @tasks.loop(minutes=2)
+    @tasks.loop(minutes=3)
     async def tiktok_check_loop(self):
         try:
             subscriptions = get_all_tiktok_subscriptions()
@@ -152,15 +154,38 @@ class TikTokCog(commands.Cog):
 
     tiktok_group = app_commands.Group(name="tiktok", description="ระบบติดตามการแจ้งเตือน LIVE TikTok")
 
+    @tiktok_group.command(name="setup", description="กำหนดห้อง Text Channel สำหรับรับการแจ้งเตือน TikTok Live")
+    @app_commands.describe(channel="เลือกห้องที่ต้องการให้บอทส่งข้อความแจ้งเตือน")
+    async def tiktok_setup(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        set_guild_tiktok_channel(interaction.guild_id, channel.id)
+
+        embed = discord.Embed(
+            title="✅ ตั้งค่าห้องแจ้งเตือน TikTok สำเร็จ!",
+            description=(
+                f"**เซิร์ฟเวอร์:** `{interaction.guild.name}`\n"
+                f"**ห้องแจ้งเตือน:** {channel.mention}\n"
+                f"**รอบตรวจสอบ:** ทุก 3 นาที\n\n"
+                f"💡 บัญชี TikTok ที่ติดตามทั้งหมดในเซิร์ฟเวอร์นี้จะแจ้งเตือนไปยังห้องนี้"
+            ),
+            color=TIKTOK_COLOR,
+            timestamp=datetime.now()
+        )
+        embed.set_footer(text="TD TikTok Live Alert", icon_url=TIKTOK_ICON)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     @tiktok_group.command(name="follow", description="เพิ่มบัญชี TikTok ที่ต้องการติดตามแจ้งเตือนไลฟ์")
     @app_commands.describe(
         username="ชื่อบัญชี TikTok (เช่น chengaming54 หรือ @chengaming54)",
-        channel="ห้อง Text Channel ที่ต้องการรับการแจ้งเตือน (หากไม่ระบุจะใช้ห้องปัจจุบัน)"
+        channel="ห้อง Text Channel ที่ต้องการรับการแจ้งเตือน (หากไม่ระบุจะใช้ห้องตามที่ตั้งค่าไว้)"
     )
     async def tiktok_follow(self, interaction: discord.Interaction, username: str, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
         clean_user = username.strip().lstrip("@").lower()
-        target_channel = channel or interaction.channel
+
+        default_channel_id = get_guild_tiktok_channel(interaction.guild_id)
+        default_channel = self.bot.get_channel(default_channel_id) if default_channel_id else None
+        target_channel = channel or default_channel or interaction.channel
 
         oembed_data = await fetch_tiktok_oembed(clean_user)
         nickname = clean_user
@@ -190,7 +215,7 @@ class TikTokCog(commands.Cog):
                 f"**ผู้สร้าง:** `{nickname}` (`@{clean_user}`)\n"
                 f"**แพลตฟอร์ม:** TikTok Live\n"
                 f"**ห้องแจ้งเตือน:** {target_channel.mention}\n"
-                f"**รอบตรวจสอบ:** ทุก 2 นาที"
+                f"**รอบตรวจสอบ:** ทุก 3 นาที"
             ),
             color=TIKTOK_COLOR
         )
@@ -219,14 +244,21 @@ class TikTokCog(commands.Cog):
     async def tiktok_list(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         subs = get_guild_tiktok_subscriptions(interaction.guild_id)
+        default_channel_id = get_guild_tiktok_channel(interaction.guild_id)
+        default_channel_text = f"<#{default_channel_id}>" if default_channel_id else "ยังไม่ได้กำหนด (ใช้ /tiktok setup)"
 
         if not subs:
-            await interaction.followup.send("📋 ยังไม่มีบัญชี TikTok ในรายการติดตาม ใช้คำสั่ง `/tiktok follow` เพื่อเริ่มติดตามได้เลย", ephemeral=True)
+            embed = discord.Embed(
+                title="🎵 รายชื่อบัญชี TikTok ที่กำลังติดตาม",
+                description=f"**ห้องแจ้งเตือนหลัก:** {default_channel_text}\n\n📋 ยังไม่มีบัญชี TikTok ในรายการติดตาม ใช้คำสั่ง `/tiktok follow` เพื่อเริ่มติดตามได้เลย",
+                color=TIKTOK_COLOR
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         embed = discord.Embed(
             title="🎵 รายชื่อบัญชี TikTok ที่กำลังติดตาม",
-            description="ระบบจะตรวจสอบสถานะ Live ทุก 2 นาที และแจ้งเตือนอัตโนมัติ",
+            description=f"**ห้องแจ้งเตือนหลัก:** {default_channel_text}\nระบบจะตรวจสอบสถานะ Live ทุก 3 นาที และแจ้งเตือนอัตโนมัติ\n",
             color=TIKTOK_COLOR,
             timestamp=datetime.now()
         )
@@ -240,7 +272,7 @@ class TikTokCog(commands.Cog):
             ch_mention = f"<#{ch_id}>"
             lines.append(f"• **[{nickname}](https://www.tiktok.com/@{uname})** (`@{uname}`) -> {ch_mention} | {live_status}")
 
-        embed.description = "\n".join(lines)
+        embed.description += "\n" + "\n".join(lines)
         embed.set_footer(text=f"รวมทั้งหมด {len(subs)} บัญชี", icon_url=TIKTOK_ICON)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
