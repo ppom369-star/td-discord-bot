@@ -371,6 +371,8 @@ def init_db():
                 last_room_id TEXT,
                 is_live INTEGER NOT NULL DEFAULT 0,
                 avatar_url TEXT,
+                rss_url TEXT,
+                last_video_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(guild_id, tiktok_username)
             );"""
@@ -382,6 +384,8 @@ def init_db():
             try:
                 cur.execute("ALTER TABLE youtube_subscriptions ADD COLUMN IF NOT EXISTS last_live_id TEXT;")
                 cur.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS tiktok_channel_id BIGINT;")
+                cur.execute("ALTER TABLE tiktok_subscriptions ADD COLUMN IF NOT EXISTS rss_url TEXT;")
+                cur.execute("ALTER TABLE tiktok_subscriptions ADD COLUMN IF NOT EXISTS last_video_id TEXT;")
             except Exception:
                 pass
             conn.commit()
@@ -523,6 +527,8 @@ def init_db():
                 last_room_id TEXT,
                 is_live INTEGER NOT NULL DEFAULT 0,
                 avatar_url TEXT,
+                rss_url TEXT,
+                last_video_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(guild_id, tiktok_username)
             )
@@ -537,6 +543,18 @@ def init_db():
         if "last_live_id" not in cols:
             try:
                 cursor.execute("ALTER TABLE youtube_subscriptions ADD COLUMN last_live_id TEXT")
+            except Exception:
+                pass
+        cursor.execute("PRAGMA table_info(tiktok_subscriptions)")
+        tiktok_cols = [row[1] for row in cursor.fetchall()]
+        if "rss_url" not in tiktok_cols:
+            try:
+                cursor.execute("ALTER TABLE tiktok_subscriptions ADD COLUMN rss_url TEXT")
+            except Exception:
+                pass
+        if "last_video_id" not in tiktok_cols:
+            try:
+                cursor.execute("ALTER TABLE tiktok_subscriptions ADD COLUMN last_video_id TEXT")
             except Exception:
                 pass
         cursor.execute("PRAGMA table_info(guild_settings)")
@@ -1127,21 +1145,23 @@ def clear_ai_chat_history(user_id: int) -> int:
         cursor.execute("DELETE FROM ai_chat_history WHERE user_id = ?", (user_id,))
         return cursor.rowcount
 
-def add_tiktok_subscription(guild_id: int, tiktok_username: str, nickname: str, alert_channel_id: int, avatar_url: str = None) -> int:
+def add_tiktok_subscription(guild_id: int, tiktok_username: str, nickname: str, alert_channel_id: int, avatar_url: str = None, rss_url: str = None, last_video_id: str = None) -> int:
     clean_user = tiktok_username.strip().lstrip("@").lower()
     safe_avatar = avatar_url if isinstance(avatar_url, str) else None
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO tiktok_subscriptions (guild_id, tiktok_username, nickname, alert_channel_id, avatar_url, is_live)
-            VALUES (?, ?, ?, ?, ?, 0)
+            INSERT INTO tiktok_subscriptions (guild_id, tiktok_username, nickname, alert_channel_id, avatar_url, rss_url, last_video_id, is_live)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
             ON CONFLICT(guild_id, tiktok_username) DO UPDATE SET
                 nickname = excluded.nickname,
                 alert_channel_id = excluded.alert_channel_id,
-                avatar_url = COALESCE(excluded.avatar_url, tiktok_subscriptions.avatar_url)
+                avatar_url = COALESCE(excluded.avatar_url, tiktok_subscriptions.avatar_url),
+                rss_url = COALESCE(excluded.rss_url, tiktok_subscriptions.rss_url),
+                last_video_id = COALESCE(excluded.last_video_id, tiktok_subscriptions.last_video_id)
             """,
-            (guild_id, clean_user, nickname, alert_channel_id, safe_avatar)
+            (guild_id, clean_user, nickname, alert_channel_id, safe_avatar, rss_url, last_video_id)
         )
         conn.commit()
         return cursor.lastrowid
@@ -1218,6 +1238,33 @@ def get_guild_tiktok_channel(guild_id: int) -> int | None:
             val = row["tiktok_channel_id"] if isinstance(row, dict) else row[0]
             return int(val) if val else None
         return None
+
+def set_tiktok_subscription_rss(guild_id: int, tiktok_username: str, rss_url: str, last_video_id: str = None) -> bool:
+    clean_user = tiktok_username.strip().lstrip("@").lower()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if last_video_id is not None:
+            cursor.execute(
+                "UPDATE tiktok_subscriptions SET rss_url = ?, last_video_id = ? WHERE guild_id = ? AND tiktok_username = ?",
+                (rss_url, last_video_id, guild_id, clean_user)
+            )
+        else:
+            cursor.execute(
+                "UPDATE tiktok_subscriptions SET rss_url = ? WHERE guild_id = ? AND tiktok_username = ?",
+                (rss_url, guild_id, clean_user)
+            )
+        conn.commit()
+        return cursor.rowcount > 0
+
+def update_tiktok_last_video(subscription_id: int, last_video_id: str):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE tiktok_subscriptions SET last_video_id = ? WHERE id = ?",
+            (last_video_id, subscription_id)
+        )
+        conn.commit()
+
 
 
 

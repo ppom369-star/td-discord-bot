@@ -1,8 +1,10 @@
 import asyncio
 import os
 import gc
+import re
 from datetime import datetime
 import httpx
+import feedparser
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -14,7 +16,9 @@ from database.db_manager import (
     update_tiktok_live_status,
     delete_tiktok_subscription,
     set_guild_tiktok_channel,
-    get_guild_tiktok_channel
+    get_guild_tiktok_channel,
+    set_tiktok_subscription_rss,
+    update_tiktok_last_video
 )
 
 TIKTOK_COLOR = discord.Color.from_rgb(254, 44, 85)
@@ -87,6 +91,74 @@ def build_tiktok_live_embed(username: str, nickname: str, room_id: str | None, t
     embed.set_footer(text="TD TikTok Live Alert", icon_url=TIKTOK_ICON)
     return embed
 
+async def fetch_tiktok_rss(feed_url: str) -> dict | None:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(feed_url)
+            if resp.status_code != 200:
+                return None
+            content = resp.text
+        loop = asyncio.get_running_loop()
+        parsed = await loop.run_in_executor(None, feedparser.parse, content)
+        if not parsed or not getattr(parsed, "entries", None):
+            return None
+
+        valid_entry = None
+        for entry in parsed.entries:
+            link = getattr(entry, "link", "")
+            if "/video/" in link:
+                valid_entry = entry
+                break
+
+        if not valid_entry:
+            return None
+
+        link = valid_entry.link
+        video_id = link.split("/video/")[-1].split("?")[0].strip()
+        title = getattr(valid_entry, "title", "คลิปใหม่บน TikTok")
+
+        thumbnail = None
+        media_content = getattr(valid_entry, "media_content", [])
+        if media_content and isinstance(media_content, list) and len(media_content) > 0:
+            thumbnail = media_content[0].get("url")
+
+        if not thumbnail and hasattr(valid_entry, "description"):
+            img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', valid_entry.description)
+            if img_match:
+                thumbnail = img_match.group(1)
+
+        return {
+            "video_id": video_id,
+            "url": link,
+            "title": title,
+            "thumbnail": thumbnail
+        }
+    except Exception:
+        return None
+
+def build_tiktok_video_embed(username: str, nickname: str, video_title: str, video_url: str, thumbnail_url: str | None, avatar_url: str | None) -> discord.Embed:
+    display_title = (video_title[:250] + "...") if len(video_title) > 250 else video_title
+    embed = discord.Embed(
+        title=display_title,
+        url=video_url,
+        color=TIKTOK_COLOR,
+        timestamp=datetime.now()
+    )
+    author_icon = avatar_url or TIKTOK_ICON
+    embed.set_author(
+        name=f"{nickname} (@{username}) โพสต์คลิปใหม่บน TikTok! 🎬",
+        icon_url=author_icon,
+        url=f"https://www.tiktok.com/@{username}"
+    )
+    if thumbnail_url:
+        embed.set_image(url=thumbnail_url)
+    elif avatar_url:
+        embed.set_thumbnail(url=avatar_url)
+
+    embed.add_field(name="🔗 ลิงก์รับชม", value=f"[คลิกเพื่อรับชมคลิปบน TikTok]({video_url})", inline=False)
+    embed.set_footer(text="TD TikTok Video Alert", icon_url=TIKTOK_ICON)
+    return embed
+
 class TikTokCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -106,6 +178,8 @@ class TikTokCog(commands.Cog):
             for sub in subscriptions:
                 uname = sub["tiktok_username"].lower()
                 grouped_subs.setdefault(uname, []).append(sub)
+
+            rss_cache: dict[str, dict | None] = {}
 
             for username, sub_list in grouped_subs.items():
                 is_live, room_id, title, live_avatar = await check_tiktok_live_status(username)
@@ -142,6 +216,41 @@ class TikTokCog(commands.Cog):
                     else:
                         if current_live:
                             update_tiktok_live_status(sub_id, is_live=0)
+
+                    rss_url = sub.get("rss_url")
+                    if rss_url:
+                        if rss_url not in rss_cache:
+                            rss_cache[rss_url] = await fetch_tiktok_rss(rss_url)
+                        rss_data = rss_cache[rss_url]
+
+                        if rss_data:
+                            latest_vid = rss_data["video_id"]
+                            last_vid = sub.get("last_video_id")
+
+                            if not last_vid:
+                                update_tiktok_last_video(sub_id, latest_vid)
+                            elif latest_vid != last_vid:
+                                update_tiktok_last_video(sub_id, latest_vid)
+                                dest_channel = self.bot.get_channel(dest_channel_id)
+                                if not dest_channel:
+                                    try:
+                                        dest_channel = await self.bot.fetch_channel(dest_channel_id)
+                                    except Exception:
+                                        dest_channel = None
+
+                                if dest_channel:
+                                    embed = build_tiktok_video_embed(
+                                        username=username,
+                                        nickname=nickname,
+                                        video_title=rss_data["title"],
+                                        video_url=rss_data["url"],
+                                        thumbnail_url=rss_data["thumbnail"],
+                                        avatar_url=avatar_url
+                                    )
+                                    await dest_channel.send(
+                                        content=f"🔔 **{nickname} (@{username}) ได้โพสต์คลิปใหม่บน TikTok! 🎬**\n{rss_data['url']}",
+                                        embed=embed
+                                    )
 
                 await asyncio.sleep(1)
 
@@ -280,8 +389,9 @@ class TikTokCog(commands.Cog):
             nickname = sub.get("nickname") or uname
             ch_id = sub["alert_channel_id"]
             live_status = "🔴 **กำลัง Live**" if sub.get("is_live") else "⚪ ออฟไลน์"
+            feed_status = "🎬 มี Feed คลิป" if sub.get("rss_url") else "⚪ ไม่มี Feed"
             ch_mention = f"<#{ch_id}>"
-            lines.append(f"• **[{nickname}](https://www.tiktok.com/@{uname})** (`@{uname}`) -> {ch_mention} | {live_status}")
+            lines.append(f"• **[{nickname}](https://www.tiktok.com/@{uname})** (`@{uname}`) -> {ch_mention} | {live_status} | {feed_status}")
 
         embed.description += "\n" + "\n".join(lines)
         embed.set_footer(text=f"รวมทั้งหมด {len(subs)} บัญชี", icon_url=TIKTOK_ICON)
@@ -320,6 +430,77 @@ class TikTokCog(commands.Cog):
             embed.set_author(name=f"{nickname} (@{clean_user})", icon_url=TIKTOK_ICON, url=f"https://www.tiktok.com/@{clean_user}")
 
         embed.set_footer(text="TD TikTok Live Checker", icon_url=TIKTOK_ICON)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @tiktok_group.command(name="feed", description="เชื่อมต่อ RSS Feed สำหรับแจ้งเตือนคลิปใหม่ของ TikTok")
+    @app_commands.describe(
+        username="ชื่อบัญชี TikTok (เช่น chengaming54 หรือ @chengaming54)",
+        rss_url="ลิงก์ RSS XML Feed (จาก RSS.app เช่น https://rss.app/feeds/xxxx.xml)"
+    )
+    async def tiktok_feed(self, interaction: discord.Interaction, username: str, rss_url: str):
+        await interaction.response.defer(ephemeral=True)
+        clean_user = username.strip().lstrip("@").lower()
+        clean_feed = rss_url.strip()
+
+        rss_data = await fetch_tiktok_rss(clean_feed)
+        if not rss_data:
+            await interaction.followup.send(
+                "❌ ไม่สามารถดึงข้อมูล RSS Feed ได้ กรุณาตรวจสอบว่าเป็นลิงก์ XML ของ TikTok ที่ถูกต้องและเปิดใช้งานอยู่",
+                ephemeral=True
+            )
+            return
+
+        subs = get_guild_tiktok_subscriptions(interaction.guild_id)
+        target_sub = next((s for s in subs if s["tiktok_username"] == clean_user), None)
+
+        if not target_sub:
+            default_channel_id = get_guild_tiktok_channel(interaction.guild_id)
+            target_channel = self.bot.get_channel(default_channel_id) if default_channel_id else interaction.channel
+
+            oembed_data = await fetch_tiktok_oembed(clean_user)
+            nickname = (oembed_data.get("author_name") if oembed_data else None) or clean_user
+
+            avatar_url = None
+            client = TikTokLiveClient(unique_id=clean_user)
+            try:
+                fetched_avatar = await client.get_avatar_url()
+                if isinstance(fetched_avatar, str) and fetched_avatar.startswith("http"):
+                    avatar_url = fetched_avatar
+            except Exception:
+                avatar_url = None
+
+            add_tiktok_subscription(
+                guild_id=interaction.guild_id,
+                tiktok_username=clean_user,
+                nickname=nickname,
+                alert_channel_id=target_channel.id,
+                avatar_url=avatar_url,
+                rss_url=clean_feed,
+                last_video_id=rss_data["video_id"]
+            )
+        else:
+            set_tiktok_subscription_rss(
+                guild_id=interaction.guild_id,
+                tiktok_username=clean_user,
+                rss_url=clean_feed,
+                last_video_id=rss_data["video_id"]
+            )
+
+        embed = discord.Embed(
+            title="✅ เชื่อมต่อ RSS Feed สำเร็จ!",
+            description=(
+                f"**บัญชี:** `@{clean_user}`\n"
+                f"**ลิงก์ฟีด:** [คลิกเพื่อดู XML]({clean_feed})\n"
+                f"**คลิปล่าสุด:** {rss_data['title']}\n"
+                f"**URL คลิป:** [ดูคลิปบน TikTok]({rss_data['url']})\n\n"
+                f"💡 บันทึกคลิปล่าสุดแล้ว ระบบจะแจ้งเตือนอัตโนมัติเมื่อมีคลิปใหม่ลงช่อง"
+            ),
+            color=TIKTOK_COLOR,
+            timestamp=datetime.now()
+        )
+        if rss_data.get("thumbnail"):
+            embed.set_image(url=rss_data["thumbnail"])
+        embed.set_footer(text="TD TikTok Video Feed", icon_url=TIKTOK_ICON)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 async def setup(bot: commands.Bot):
