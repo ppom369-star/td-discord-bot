@@ -80,7 +80,7 @@ class TDBot(commands.Bot):
             cmd = interaction.command
             cmd_name = cmd.root_parent.name if (cmd and cmd.root_parent) else (cmd.name if cmd else None)
 
-            if cmd_name == "youtube":
+            if cmd_name in ("youtube", "stream", "tiktok"):
                 if not interaction.guild:
                     await interaction.response.send_message("❌ คำสั่งนี้สามารถใช้ได้เฉพาะในเซิร์ฟเวอร์เท่านั้น", ephemeral=True)
                     return False

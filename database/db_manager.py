@@ -53,7 +53,7 @@ def configure_sqlite(conn: sqlite3.Connection):
         pass
 
 class PostgresCursorWrapper:
-    ID_TABLES = {"todos", "reminders", "rss_feeds", "memos", "transactions", "stream_trackers", "youtube_subscriptions", "ai_chat_history", "youtube_seen_videos"}
+    ID_TABLES = {"todos", "reminders", "rss_feeds", "memos", "transactions", "stream_trackers", "youtube_subscriptions", "ai_chat_history", "youtube_seen_videos", "tiktok_subscriptions"}
 
     def __init__(self, cur):
         self._cur = cur
@@ -361,7 +361,19 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(subscription_id, video_id)
             );""",
-            """CREATE INDEX IF NOT EXISTS idx_youtube_seen_sub ON youtube_seen_videos(subscription_id, video_id);"""
+            """CREATE INDEX IF NOT EXISTS idx_youtube_seen_sub ON youtube_seen_videos(subscription_id, video_id);""",
+            """CREATE TABLE IF NOT EXISTS tiktok_subscriptions (
+                id BIGSERIAL PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                tiktok_username TEXT NOT NULL,
+                nickname TEXT,
+                alert_channel_id BIGINT NOT NULL,
+                last_room_id TEXT,
+                is_live INTEGER NOT NULL DEFAULT 0,
+                avatar_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, tiktok_username)
+            );"""
         ]
         with get_connection() as conn:
             cur = conn.cursor()
@@ -500,6 +512,20 @@ def init_db():
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_youtube_seen_sub ON youtube_seen_videos(subscription_id, video_id);")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tiktok_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                tiktok_username TEXT NOT NULL,
+                nickname TEXT,
+                alert_channel_id INTEGER NOT NULL,
+                last_room_id TEXT,
+                is_live INTEGER NOT NULL DEFAULT 0,
+                avatar_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, tiktok_username)
+            )
+        """)
         cursor.execute("PRAGMA table_info(youtube_subscriptions)")
         cols = [row[1] for row in cursor.fetchall()]
         if "avatar_url" not in cols:
@@ -1092,5 +1118,69 @@ def clear_ai_chat_history(user_id: int) -> int:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM ai_chat_history WHERE user_id = ?", (user_id,))
         return cursor.rowcount
+
+def add_tiktok_subscription(guild_id: int, tiktok_username: str, nickname: str, alert_channel_id: int, avatar_url: str = None) -> int:
+    clean_user = tiktok_username.strip().lstrip("@").lower()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO tiktok_subscriptions (guild_id, tiktok_username, nickname, alert_channel_id, avatar_url, is_live)
+            VALUES (?, ?, ?, ?, ?, 0)
+            ON CONFLICT(guild_id, tiktok_username) DO UPDATE SET
+                nickname = excluded.nickname,
+                alert_channel_id = excluded.alert_channel_id,
+                avatar_url = COALESCE(excluded.avatar_url, tiktok_subscriptions.avatar_url)
+            """,
+            (guild_id, clean_user, nickname, alert_channel_id, avatar_url)
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+def get_guild_tiktok_subscriptions(guild_id: int) -> list[dict]:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tiktok_subscriptions WHERE guild_id = ? ORDER BY id ASC", (guild_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+def get_all_tiktok_subscriptions() -> list[dict]:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tiktok_subscriptions ORDER BY id ASC")
+        return [dict(row) for row in cursor.fetchall()]
+
+def update_tiktok_live_status(subscription_id: int, is_live: int, last_room_id: str = None, avatar_url: str = None):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if last_room_id is not None and avatar_url is not None:
+            cursor.execute(
+                "UPDATE tiktok_subscriptions SET is_live = ?, last_room_id = ?, avatar_url = ? WHERE id = ?",
+                (is_live, last_room_id, avatar_url, subscription_id)
+            )
+        elif last_room_id is not None:
+            cursor.execute(
+                "UPDATE tiktok_subscriptions SET is_live = ?, last_room_id = ? WHERE id = ?",
+                (is_live, last_room_id, subscription_id)
+            )
+        elif avatar_url is not None:
+            cursor.execute(
+                "UPDATE tiktok_subscriptions SET is_live = ?, avatar_url = ? WHERE id = ?",
+                (is_live, avatar_url, subscription_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE tiktok_subscriptions SET is_live = ? WHERE id = ?",
+                (is_live, subscription_id)
+            )
+        conn.commit()
+
+def delete_tiktok_subscription(guild_id: int, tiktok_username: str) -> bool:
+    clean_user = tiktok_username.strip().lstrip("@").lower()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tiktok_subscriptions WHERE guild_id = ? AND tiktok_username = ?", (guild_id, clean_user))
+        conn.commit()
+        return cursor.rowcount > 0
+
 
 
