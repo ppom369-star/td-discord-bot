@@ -18,7 +18,7 @@ from database.db_manager import (
 )
 
 TIKTOK_COLOR = discord.Color.from_rgb(254, 44, 85)
-TIKTOK_ICON = "https://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/tiktok/webapp/main/webapp-desktop/8372691238e8334be559.png"
+TIKTOK_ICON = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/tiktok.png"
 
 async def fetch_tiktok_oembed(username: str) -> dict | None:
     url = f"https://www.tiktok.com/oembed?url=https://www.tiktok.com/@{username}"
@@ -31,24 +31,35 @@ async def fetch_tiktok_oembed(username: str) -> dict | None:
         return None
     return None
 
-async def check_tiktok_live_status(username: str) -> tuple[bool, str | None, str | None]:
+async def check_tiktok_live_status(username: str) -> tuple[bool, str | None, str | None, str | None]:
     client = TikTokLiveClient(unique_id=username)
     try:
         is_live = await client.is_live()
         room_id = str(client.room_id) if client.room_id else None
         title = None
+        live_avatar = None
         if is_live:
+            try:
+                fetched = await client.get_avatar_url()
+                if isinstance(fetched, str) and fetched.startswith("http"):
+                    live_avatar = fetched
+            except Exception:
+                live_avatar = None
             try:
                 room_info = await client.web.fetch_room_info()
                 if isinstance(room_info, dict):
                     title = room_info.get("title")
+                    if not live_avatar and "owner" in room_info and isinstance(room_info["owner"], dict):
+                        urls = room_info["owner"].get("avatar_thumb", {}).get("url_list", [])
+                        if urls and isinstance(urls[0], str):
+                            live_avatar = urls[0]
                 else:
                     title = getattr(room_info, "title", None)
             except Exception:
                 title = None
-        return is_live, room_id, title
+        return is_live, room_id, title, live_avatar
     except Exception:
-        return False, None, None
+        return False, None, None, None
 
 def build_tiktok_live_embed(username: str, nickname: str, room_id: str | None, title: str | None, avatar_url: str | None) -> discord.Embed:
     stream_title = title or f"{nickname} กำลัง Live อยู่ในขณะนี้!"
@@ -97,20 +108,20 @@ class TikTokCog(commands.Cog):
                 grouped_subs.setdefault(uname, []).append(sub)
 
             for username, sub_list in grouped_subs.items():
-                is_live, room_id, title = await check_tiktok_live_status(username)
+                is_live, room_id, title, live_avatar = await check_tiktok_live_status(username)
 
                 for sub in sub_list:
                     sub_id = sub["id"]
                     last_id = sub.get("last_room_id")
                     current_live = sub.get("is_live", 0)
                     nickname = sub.get("nickname") or username
-                    avatar_url = sub.get("avatar_url")
+                    avatar_url = live_avatar or sub.get("avatar_url")
                     dest_channel_id = sub["alert_channel_id"]
 
                     if is_live:
                         effective_room_id = room_id or "live_now"
                         if effective_room_id != last_id:
-                            update_tiktok_live_status(sub_id, is_live=1, last_room_id=effective_room_id)
+                            update_tiktok_live_status(sub_id, is_live=1, last_room_id=effective_room_id, avatar_url=avatar_url)
                             dest_channel = self.bot.get_channel(dest_channel_id)
                             if not dest_channel:
                                 try:
@@ -282,7 +293,7 @@ class TikTokCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         clean_user = username.strip().lstrip("@").lower()
 
-        is_live, room_id, title = await check_tiktok_live_status(clean_user)
+        is_live, room_id, title, live_avatar = await check_tiktok_live_status(clean_user)
         oembed_data = await fetch_tiktok_oembed(clean_user)
         nickname = (oembed_data.get("author_name") if oembed_data else None) or clean_user
 
@@ -293,6 +304,9 @@ class TikTokCog(commands.Cog):
                 url=f"https://www.tiktok.com/@{clean_user}/live",
                 color=TIKTOK_COLOR
             )
+            embed.set_author(name=f"{nickname} (@{clean_user})", icon_url=live_avatar or TIKTOK_ICON, url=f"https://www.tiktok.com/@{clean_user}/live")
+            if live_avatar:
+                embed.set_thumbnail(url=live_avatar)
             if room_id:
                 embed.add_field(name="Room ID", value=f"`{room_id}`", inline=True)
             embed.add_field(name="ลิงก์", value=f"[เข้าชมไลฟ์](https://www.tiktok.com/@{clean_user}/live)", inline=True)
@@ -303,6 +317,7 @@ class TikTokCog(commands.Cog):
                 url=f"https://www.tiktok.com/@{clean_user}",
                 color=discord.Color.dark_grey()
             )
+            embed.set_author(name=f"{nickname} (@{clean_user})", icon_url=TIKTOK_ICON, url=f"https://www.tiktok.com/@{clean_user}")
 
         embed.set_footer(text="TD TikTok Live Checker", icon_url=TIKTOK_ICON)
         await interaction.followup.send(embed=embed, ephemeral=True)
